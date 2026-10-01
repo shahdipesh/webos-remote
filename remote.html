@@ -64,8 +64,6 @@
   #pad.tap{border-color:var(--ok);}
   .scrollpad{display:grid;grid-template-columns:repeat(3,64px);gap:8px;justify-content:center;}
   .scrollpad .btn{aspect-ratio:1.35;border-radius:14px;font-size:18px;}
-  .dpad{display:grid;grid-template-columns:repeat(3,64px);gap:8px;justify-content:center;}
-  .dpad .btn{aspect-ratio:1.35;border-radius:14px;font-size:18px;}
   .volch{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
   .volch .col{display:flex;flex-direction:column;gap:10px;}
   .volval{text-align:center;font-size:13px;color:var(--dim);font-weight:600;min-height:18px;}
@@ -134,15 +132,6 @@
         <button class="btn small" data-key="BACK">← Back</button>
         <button class="btn small" data-key="HOME">⌂ Home</button>
         <button class="btn small" data-key="EXIT">Exit</button>
-      </div>
-    </div>
-
-    <div class="card">
-      <h2>D-pad</h2>
-      <div class="dpad">
-        <div></div><button class="btn" data-key="UP">▲</button><div></div>
-        <button class="btn" data-key="LEFT">◀</button><button class="btn" data-key="ENTER">OK</button><button class="btn" data-key="RIGHT">▶</button>
-        <div></div><button class="btn" data-key="DOWN">▼</button><div></div>
       </div>
     </div>
 
@@ -222,7 +211,7 @@
 <script>
 (function(){
 "use strict";
-var APP_VER='v25';
+var APP_VER='v23';
 // Cache the page for offline loads: iOS pauses a-Shell in the background,
 // which also stops its file server. The service worker serves the cached
 // page so it still opens; the relay is only needed as a fallback.
@@ -636,36 +625,12 @@ function heartbeat(){
 function startHeartbeat(){ stopHeartbeat(); hbTimer=setInterval(heartbeat, 10000); }
 function stopHeartbeat(){ if(hbTimer){ clearInterval(hbTimer); hbTimer=null; } asleep=false; }
 
-// Home: this TV's firmware ignores pointer-socket button presses, so find the
-// home/launcher app on the TV itself and launch it instead of guessing the ID.
+// Home gets a fallback: this TV's firmware ignores pointer-socket button
+// presses (known limitation on some builds), so also launch the home app
+// directly — whichever path the TV honors wins.
 function goHome(){
   press('HOME');
-  request('ssap://com.webos.applicationManager/listApps').then(function(r){
-    var apps=(r && r.apps)||[], home=null, i, id;
-    for(i=0;i<apps.length;i++){ id=String(apps[i].id||'').toLowerCase();
-      if(id==='com.webos.app.home'){ home=apps[i].id; break; } }
-    if(!home) for(i=0;i<apps.length;i++){ id=String(apps[i].id||'').toLowerCase();
-      if(id.indexOf('home')>=0 && id.indexOf('homebrew')<0){ home=apps[i].id; break; } }
-    if(home){ dlog('home app: '+home); cmd('ssap://system.launcher/launch',{id:home},'Home'); }
-    else{
-      dlog('no home app in list ('+apps.length+' apps)');
-      dlog('ids: '+apps.map(function(a){return a.id;}).join(', ').slice(0,400));
-      setStatus('Home app not found — see debug log.', true);
-    }
-  }).catch(function(e){
-    dlog('listApps failed: '+e.message);
-    cmd('ssap://system.launcher/launch',{id:'com.webos.app.home'},'Home');
-  });
-}
-// Exit: close whatever app is in the foreground (the closest SSAP to EXIT).
-function goExit(){
-  press('EXIT');
-  request('ssap://com.webos.applicationManager/getForegroundAppInfo').then(function(r){
-    var appId=r && r.appId;
-    dlog('foreground: '+(appId||'?'));
-    if(!appId){ setStatus('No foreground app to close.', true); return; }
-    cmd('ssap://system.launcher/close',{id:appId},'Exit');
-  }).catch(function(e){ dlog('exit lookup failed: '+e.message); });
+  cmd('ssap://system.launcher/launch', {id:'com.webos.app.home'}, 'Home');
 }
 function press(name){
   ensurePtr(function(ok){
@@ -869,7 +834,7 @@ var keyBtns=document.querySelectorAll('[data-key]');
 for(var i=0;i<keyBtns.length;i++){
   (function(b){ b.addEventListener('click', function(){
     var k=b.getAttribute('data-key');
-    if(k==='HOME') goHome(); else if(k==='EXIT') goExit(); else press(k);
+    if(k==='HOME') goHome(); else press(k);
   }); })(keyBtns[i]);
 }
 var appBtns=document.querySelectorAll('[data-app]');
