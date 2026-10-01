@@ -176,17 +176,8 @@ var MANIFEST={
   "pairingType": "PROMPT",
   "manifest": {
     "manifestVersion": 1,
-    "appVersion": "1.1",
-    "signed": {
-      "created": "20140509",
-      "appId": "com.lge.test",
-      "vendorId": "com.lge",
-      "localizedAppNames": {"": "LG Remote App", "ko-KR": "리모컨 앱", "zxx-XX": "ЛГ Rэмotэ AПП"},
-      "localizedVendorNames": {"": "LG Electronics"},
-      "permissions": ["TEST_SECURE","CONTROL_INPUT_TEXT","CONTROL_MOUSE_AND_KEYBOARD","READ_INSTALLED_APPS","READ_LGE_SDX","READ_NOTIFICATIONS","SEARCH","WRITE_SETTINGS","WRITE_NOTIFICATION_ALERT","CONTROL_POWER","READ_CURRENT_CHANNEL","READ_RUNNING_APPS","READ_UPDATE_INFO","UPDATE_FROM_REMOTE_APP","READ_LGE_TV_INPUT_EVENTS","READ_TV_CURRENT_TIME"],
-      "serial": "2f930e2d2cfe083771f68e4fe7bb07"
-    },
-    "permissions": ["LAUNCH","LAUNCH_WEBAPP","APP_TO_APP","CLOSE","TEST_OPEN","TEST_PROTECTED","CONTROL_AUDIO","CONTROL_DISPLAY","CONTROL_INPUT_JOYSTICK","CONTROL_INPUT_MEDIA_RECORDING","CONTROL_INPUT_MEDIA_PLAYBACK","CONTROL_INPUT_TV","CONTROL_POWER","READ_APP_STATUS","READ_CURRENT_CHANNEL","READ_INPUT_DEVICE_LIST","READ_NETWORK_STATE","READ_RUNNING_APPS","READ_TV_CHANNEL_LIST","WRITE_NOTIFICATION_TOAST","READ_POWER_STATE","READ_COUNTRY_INFO","READ_SETTINGS","CONTROL_TV_SCREEN","CONTROL_TV_STANBY","CONTROL_FAVORITE_GROUP","CONTROL_USER_INFO","CHECK_BLUETOOTH_DEVICE","CONTROL_BLUETOOTH","CONTROL_TIMER_INFO","STB_INTERNAL_CONNECTION","CONTROL_RECORDING","READ_RECORDING_STATE","WRITE_RECORDING_LIST","READ_RECORDING_LIST","READ_RECORDING_SCHEDULE","WRITE_RECORDING_SCHEDULE","READ_STORAGE_DEVICE_LIST","READ_TV_PROGRAM_INFO","CONTROL_BOX_CHANNEL","READ_TV_ACR_AUTH_TOKEN","READ_TV_CONTENT_STATE","READ_TV_CURRENT_TIME","ADD_LAUNCHER_CHANNEL","SET_CHANNEL_SKIP","RELEASE_CHANNEL_SKIP","CONTROL_CHANNEL_BLOCK","DELETE_SELECT_CHANNEL","CONTROL_CHANNEL_GROUP","SCAN_TV_CHANNELS","CONTROL_TV_POWER","CONTROL_WOL"]
+    "appVersion": "1.0",
+    "permissions": ["LAUNCH","LAUNCH_WEBAPP","APP_TO_APP","CLOSE","TEST_OPEN","TEST_PROTECTED","CONTROL_AUDIO","CONTROL_DISPLAY","CONTROL_INPUT_JOYSTICK","CONTROL_INPUT_MEDIA_RECORDING","CONTROL_INPUT_MEDIA_PLAYBACK","CONTROL_INPUT_TV","CONTROL_POWER","READ_APP_STATUS","READ_CURRENT_CHANNEL","READ_INPUT_DEVICE_LIST","READ_NETWORK_STATE","READ_RUNNING_APPS","READ_TV_CHANNEL_LIST","WRITE_NOTIFICATION_TOAST","READ_POWER_STATE","READ_COUNTRY_INFO","READ_SETTINGS","CONTROL_TV_SCREEN","CONTROL_TV_STANBY","CONTROL_FAVORITE_GROUP","CONTROL_USER_INFO","CHECK_BLUETOOTH_DEVICE","CONTROL_BLUETOOTH","CONTROL_TIMER_INFO","STB_INTERNAL_CONNECTION","CONTROL_RECORDING","READ_RECORDING_STATE","WRITE_RECORDING_LIST","READ_RECORDING_LIST","READ_RECORDING_SCHEDULE","WRITE_RECORDING_SCHEDULE","READ_STORAGE_DEVICE_LIST","READ_TV_PROGRAM_INFO","CONTROL_BOX_CHANNEL","READ_TV_ACR_AUTH_TOKEN","READ_TV_CONTENT_STATE","READ_TV_CURRENT_TIME","ADD_LAUNCHER_CHANNEL","SET_CHANNEL_SKIP","RELEASE_CHANNEL_SKIP","CONTROL_CHANNEL_BLOCK","DELETE_SELECT_CHANNEL","CONTROL_CHANNEL_GROUP","SCAN_TV_CHANNELS","CONTROL_TV_POWER","CONTROL_WOL","CONTROL_INPUT_TEXT","CONTROL_MOUSE_AND_KEYBOARD"]
   }
 };
 
@@ -217,18 +208,21 @@ function tryUrl(ip, urls, i){
     var key=null;
     try{ key=localStorage.getItem(LS_KEY); }catch(e){}
     if(key){ payload['client-key']=key; }
-    ws.send(JSON.stringify({id:cid(), type:'register', payload:payload}));
+    var rid=cid();
+    pending[rid]={resolve:function(){}, reject:function(e){ setStatus('Pairing rejected by TV: '+e.message, true); }};
+    ws.send(JSON.stringify({id:rid, type:'register', payload:payload}));
     setStatus('Waiting for TV…');
   };
   sock.onmessage=onMessage;
   sock.onerror=function(){ if(!opened) next(); };
-  sock.onclose=function(){
+  sock.onclose=function(ev){
     if(!opened){ next(); return; }
-    onWsClose();
+    onWsClose(ev);
   };
 }
 
-function onWsClose(){
+function onWsClose(ev){
+  var code=ev&&ev.code;
   ws=null;
   isConnected=false; ptrReady=false;
   if(ptrWs){ try{ptrWs.close();}catch(e){} ptrWs=null; }
@@ -236,7 +230,7 @@ function onWsClose(){
   pending={};
   setPill('Disconnected','');
   remoteEl.classList.add('hidden'); setupEl.classList.remove('hidden');
-  setStatus('Disconnected.', false);
+  setStatus(code&&code!==1000?('Disconnected (code '+code+').'):('Disconnected.'), false);
 }
 
 function onFail(msg){
@@ -247,7 +241,14 @@ function onFail(msg){
 
 function onMessage(ev){
   var m; try{ m=JSON.parse(ev.data); }catch(e){ return; }
+  if(m.type==='error'){
+    var emsg=m.error||(m.payload&&(m.payload.errorText||m.payload.errorCode))||'unknown error';
+    if(m.id && pending[m.id]){ var cbe=pending[m.id]; delete pending[m.id]; try{cbe.reject(new Error(emsg));}catch(e){} }
+    else setStatus('TV error: '+emsg, true);
+    return;
+  }
   if(m.type==='registered'){
+    if(m.id && pending[m.id]){ delete pending[m.id]; }
     if(m.payload && m.payload['client-key']){
       try{ localStorage.setItem(LS_KEY, m.payload['client-key']); }catch(e){}
       onPaired();
