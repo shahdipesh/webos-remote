@@ -61,6 +61,7 @@
   }
   #pad .padhint{color:var(--dim);font-size:13px;line-height:1.7;pointer-events:none;text-align:center;padding:0 24px;}
   #pad.active .padhint{opacity:0;}
+  #pad.tap{border-color:var(--ok);}
   .volch{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
   .volch .col{display:flex;flex-direction:column;gap:10px;}
   .volval{text-align:center;font-size:13px;color:var(--dim);font-weight:600;min-height:18px;}
@@ -122,6 +123,10 @@
       <div style="height:10px"></div>
       <div class="row">
         <button class="btn small" id="padClick">Click</button>
+        <button class="btn small" data-key="ENTER">OK</button>
+      </div>
+      <div style="height:10px"></div>
+      <div class="row">
         <button class="btn small" data-key="BACK">← Back</button>
         <button class="btn small" data-key="HOME">⌂ Home</button>
         <button class="btn small" data-key="EXIT">Exit</button>
@@ -194,7 +199,7 @@
 <script>
 (function(){
 "use strict";
-var APP_VER='v16';
+var APP_VER='v17';
 // Cache the page for offline loads: iOS pauses a-Shell in the background,
 // which also stops its file server. The service worker serves the cached
 // page so it still opens; the relay is only needed as a fallback.
@@ -625,30 +630,35 @@ function press(name){
 }
 
 // Touchpad: one finger drag = move the TV cursor, tap = click,
-// two-finger drag = scroll. Same pointer socket the D-pad used, so no
+// two-finger drag = scroll (both directions). Same pointer socket the D-pad used, so no
 // new permissions or pairing are needed.
 (function(){
   var pad=$('pad'); if(!pad) return;
-  var pts={}, gesture=null, accX=0, accY=0, accS=0, flushOn=false;
+  var pts={}, gesture=null, accX=0, accY=0, accSX=0, accSY=0, flushOn=false;
   var SENS=2.2, SSENS=3; // finger px -> cursor px multipliers
   function ptrOk(){ return ptrReady && ptrWs && ptrWs.readyState===1; }
   function flush(){
     flushOn=false;
-    var mx=Math.round(accX*SENS), my=Math.round(accY*SENS), sy=Math.round(accS*SSENS);
-    accX=0; accY=0; accS=0;
-    if(!ptrOk() || (!mx && !my && !sy)) return;
+    var mx=Math.round(accX*SENS), my=Math.round(accY*SENS);
+    var sx=Math.round(accSX*SSENS), sy=Math.round(accSY*SSENS);
+    accX=0; accY=0; accSX=0; accSY=0;
+    if(!ptrOk() || (!mx && !my && !sx && !sy)) return;
     try{
       if(mx||my) ptrWs.send('type:move\ndx:'+mx+'\ndy:'+my+'\n\n');
-      if(sy) ptrWs.send('type:scroll\ndx:0\ndy:'+sy+'\n\n');
+      if(sx||sy) ptrWs.send('type:scroll\ndx:'+sx+'\ndy:'+sy+'\n\n');
     }catch(e){}
   }
-  function queue(dx,dy,ds){
-    accX+=dx; accY+=dy; accS+=ds;
+  function queue(dx,dy,sdx,sdy){
+    accX+=dx; accY+=dy; accSX+=sdx; accSY+=sdy;
     if(!flushOn){ flushOn=true; requestAnimationFrame(flush); }
   }
-  function avgY(){ var s=0,n=0; for(var k in pts){ s+=pts[k].y; n++; } return n?s/n:0; }
+  function avg(which){ var s=0,n=0; for(var k in pts){ s+=pts[k][which]; n++; } return n?s/n:0; }
+  function flash(){
+    pad.classList.add('tap');
+    setTimeout(function(){ pad.classList.remove('tap'); }, 200);
+  }
   function doClick(){
-    if(ptrOk()){ try{ ptrWs.send('type:click\n\n'); }catch(e){} }
+    if(ptrOk()){ try{ ptrWs.send('type:click\n\n'); flash(); dlog('tap -> click sent'); }catch(e){} }
     else setStatus('Pointer not ready yet — wait a second and retry.', true);
   }
   pad.addEventListener('pointerdown', function(e){
@@ -656,7 +666,7 @@ function press(name){
     pts[e.pointerId]={x:e.clientX,y:e.clientY};
     var n=Object.keys(pts).length;
     if(n===1){ gesture={mode:'move',t:Date.now(),moved:0}; pad.classList.add('active'); }
-    else if(n===2){ gesture={mode:'scroll',sy:avgY(),moved:0}; }
+    else if(n===2){ gesture={mode:'scroll',sx:avg('x'),sy:avg('y'),moved:0}; }
   });
   pad.addEventListener('pointermove', function(e){
     var p=pts[e.pointerId]; if(!p||!gesture) return;
@@ -665,12 +675,14 @@ function press(name){
       var dx=e.clientX-p.x, dy=e.clientY-p.y;
       p.x=e.clientX; p.y=e.clientY;
       gesture.moved+=Math.abs(dx)+Math.abs(dy);
-      if(dx||dy) queue(dx,dy,0);
+      if(dx||dy) queue(dx,dy,0,0);
     }else if(gesture.mode==='scroll'){
-      var y=avgY(), dy2=y-gesture.sy; gesture.sy=y;
       p.x=e.clientX; p.y=e.clientY;
-      gesture.moved+=Math.abs(dy2);
-      if(dy2) queue(0,0,dy2);
+      var nx=avg('x'), ny=avg('y');
+      var sdx=nx-gesture.sx, sdy=ny-gesture.sy;
+      gesture.sx=nx; gesture.sy=ny;
+      gesture.moved+=Math.abs(sdx)+Math.abs(sdy);
+      if(sdx||sdy) queue(0,0,sdx,sdy);
     }
   });
   function up(e){
@@ -678,7 +690,7 @@ function press(name){
     delete pts[e.pointerId];
     var left=Object.keys(pts).length;
     if(left===0){
-      if(g && g.mode==='move' && n===1 && (Date.now()-g.t)<350 && g.moved<16) doClick();
+      if(g && g.mode==='move' && n===1 && (Date.now()-g.t)<400 && g.moved<24) doClick();
       gesture=null; pad.classList.remove('active');
     }else if(left===1 && g && g.mode==='scroll'){
       gesture={mode:'move',t:Date.now(),moved:0,sync:true}; // re-sync: swallow the next delta
