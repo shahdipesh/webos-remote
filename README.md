@@ -48,3 +48,9 @@ The page talks to the relay at `ws://127.0.0.1:8765/?target=...`, which
 re-opens the connection to the TV with no `Origin` header — just like a native
 app. Stdlib only, no packages to install. If the relay isn't running, the page
 falls back to a direct connection automatically.
+
+**iOS note:** iOS pauses a-Shell when it's in the background, which pauses the
+relay too (connections stall, they don't die — taps queue and flush on wake).
+The page now detects this with a heartbeat and shows "Relay asleep — swipe to
+a-Shell and back to wake it". A service worker also caches the page, so it
+still opens when a-Shell is asleep; only actual commands need the relay awake.
