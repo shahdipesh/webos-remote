@@ -128,6 +128,20 @@
     </div>
 
     <div class="card">
+      <h2>Keyboard</h2>
+      <div class="pinrow">
+        <input id="kbInput" type="text" placeholder="Type for the TV…" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="send">
+        <button class="btn primary" id="kbSend">Send</button>
+      </div>
+      <div style="height:10px"></div>
+      <div class="row">
+        <button class="btn small" id="kbBack">⌫ Delete</button>
+        <button class="btn small" id="kbEnter">⏎ Enter</button>
+      </div>
+      <p class="hint">Focus a text field on the TV first (e.g. YouTube search), then type here and hit Send.</p>
+    </div>
+
+    <div class="card">
       <div class="volch">
         <div class="col">
           <button class="btn" id="volUp">🔊 Vol +</button>
@@ -620,6 +634,16 @@ function refreshVolume(){
   }).catch(function(){});
 }
 
+// Phone keyboard -> TV text field (focus a text field on the TV first).
+function kbSend(){
+  var t=$('kbInput').value;
+  if(!t) return;
+  cmd('ssap://com.webos.service.ime/insertText', {text:t}, 'text');
+  $('kbInput').value='';
+}
+function kbDelete(){ cmd('ssap://com.webos.service.ime/deleteCharacters', {count:1}, 'delete'); }
+function kbEnter(){ cmd('ssap://com.webos.service.ime/sendEnterKey', {}, 'enter'); }
+
 function disconnect(silent){
   stopHeartbeat();
   if(ws){ try{ws.close();}catch(e){} ws=null; }
@@ -639,6 +663,10 @@ $('forgetBtn').addEventListener('click', function(){
   remoteEl.classList.add('hidden'); setupEl.classList.remove('hidden');
   setStatus('Forgot TV. Enter the IP to pair again.');
 });
+$('kbSend').addEventListener('click', kbSend);
+$('kbInput').addEventListener('keydown', function(e){ if(e.key==='Enter'){ e.preventDefault(); kbSend(); } });
+$('kbBack').addEventListener('click', kbDelete);
+$('kbEnter').addEventListener('click', kbEnter);
 
 var keyBtns=document.querySelectorAll('[data-key]');
 for(var i=0;i<keyBtns.length;i++){
