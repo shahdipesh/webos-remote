@@ -100,7 +100,7 @@
         <button class="btn primary" id="pinSendBtn">Send</button>
       </div>
     </div>
-    <p class="hint" id="setupHint">First time: the TV should show a pairing prompt — accept it with your normal remote. If that fails, use PIN pairing.<br><br>Run <code>python3 relay.py</code> in a-Shell first — it serves this page and fixes TVs that instantly reject browser connections. Note: iOS pauses a-Shell in the background, which pauses the relay too — if buttons stop responding, swipe to a-Shell and back to wake it.</p>
+    <p class="hint" id="setupHint">First time: the TV should show a pairing prompt — accept it with your normal remote. If that fails, use PIN pairing.<br><br>The page connects to the TV directly (no extra software needed). If the direct route ever fails it falls back to a local relay — for that, run <code>python3 relay.py</code> in a-Shell, which also serves this page over your Wi-Fi.</p>
   </div>
 
   <!-- REMOTE -->
@@ -167,7 +167,7 @@
         <button class="btn small" id="reconnectBtn">↻ Reconnect</button>
         <button class="btn small" id="forgetBtn">Forget TV</button>
       </div>
-      <p class="hint">Tip: add this page to your home screen for an app-like remote. The TV must be <b>on</b> — power-on isn't possible over the network. If buttons stop responding, iOS has paused a-Shell in the background: swipe to a-Shell and back to wake the relay.</p>
+      <p class="hint">Tip: add this page to your home screen for an app-like remote. The TV must be <b>on</b> — power-on isn't possible over the network.</p>
     </div>
   </div>
 
@@ -362,6 +362,67 @@ function sendPin(){
 
 function setBusy(b){ $('connectBtn').disabled=b; $('pinBtn').disabled=b; }
 
+// Sock: WebSocket-compatible wrapper whose connection is opened from inside a
+// hidden sandboxed iframe (socket.html). The iframe has an opaque origin, so
+// its handshake carries "Origin: null" -- which the TV accepts (relay.py
+// --probe proved it), unlike the page's own http://127.0.0.1:8000 origin.
+// Same interface as WebSocket (readyState/send/close/onopen/onmessage/onclose)
+// so the rest of the code doesn't care which transport it's using.
+var sockFrame=null, sockFrameReady=false, sockReadyQueue=[], socks={}, sockSeq=0;
+function ensureSockFrame(cb){
+  if(sockFrameReady) return cb();
+  sockReadyQueue.push(cb);
+  if(sockFrame) return;
+  sockFrame=document.createElement('iframe');
+  sockFrame.setAttribute('sandbox','allow-scripts');
+  sockFrame.src='socket.html';
+  sockFrame.style.display='none';
+  sockFrame.setAttribute('aria-hidden','true');
+  document.body.appendChild(sockFrame);
+}
+window.addEventListener('message', function(e){
+  if(!sockFrame || e.source!==sockFrame.contentWindow) return;
+  var d=e.data||{};
+  if(d.t==='ready'){
+    sockFrameReady=true;
+    var q=sockReadyQueue; sockReadyQueue=[];
+    for(var i=0;i<q.length;i++) q[i]();
+    return;
+  }
+  var s=socks[d.id]; if(!s) return;
+  if(d.t==='open'){ s._open(); }
+  else if(d.t==='msg'){ if(s.onmessage) s.onmessage({data:d.data}); }
+  else if(d.t==='closed'){ s._closed(d.code||0); }
+});
+function Sock(url){
+  var self=this, id='s'+(++sockSeq);
+  socks[id]=self;
+  self.readyState=0;
+  self.onopen=null; self.onmessage=null; self.onclose=null; self.onerror=null;
+  self._open=function(){ self.readyState=1; if(self.onopen) self.onopen(); };
+  self._closed=function(code){
+    self.readyState=3;
+    if(self.onclose) self.onclose({code:code});
+    delete socks[id];
+  };
+  ensureSockFrame(function(){
+    if(socks[id]!==self) return; // superseded while the frame was loading
+    sockFrame.contentWindow.postMessage({t:'connect', id:id, url:url}, '*');
+  });
+  self.send=function(data){
+    if(sockFrameReady && socks[id]===self){
+      sockFrame.contentWindow.postMessage({t:'send', id:id, data:String(data)}, '*');
+    }
+  };
+  self.close=function(){
+    if(socks[id]===self){
+      delete socks[id];
+      self.readyState=3;
+      if(sockFrameReady){ try{ sockFrame.contentWindow.postMessage({t:'close', id:id}, '*'); }catch(e){} }
+    }
+  };
+}
+
 function connect(type){
   if($('connectBtn').disabled) return; // ignore double-taps: one pairing flow at a time
   pairingType=(type==='PIN')?'PIN':'PROMPT';
@@ -374,26 +435,29 @@ function connect(type){
   try{ localStorage.setItem(LS_IP, ip); }catch(e){}
   disconnect(false);
   setPill('Connecting…','busy');
-  // Relay first: it strips the browser Origin header that some TV firmware
-  // rejects with an instant 1008 close. Falls back to a direct connection.
+  // Direct first: the sandboxed iframe (socket.html) opens the TV connection
+  // with "Origin: null", which this TV accepts -- no relay needed. Falls back
+  // to the local relay (needs python3 relay.py awake in a-Shell), then to a
+  // plain direct attempt.
   tryUrl(ip, [
-    relayUrl('wss://'+ip+':3001/'),
-    'wss://'+ip+':3001',
-    'ws://'+ip+':3000'
+    {url:'wss://'+ip+':3001/', via:'iframe', label:'direct (null origin)'},
+    {url:relayUrl('wss://'+ip+':3001/'), via:'native', relay:true, label:'local relay'},
+    {url:'wss://'+ip+':3001', via:'native', label:'wss://:3001'},
+    {url:'ws://'+ip+':3000', via:'native', label:'ws://:3000'}
   ], 0);
 }
 
 function tryUrl(ip, urls, i){
   if(i>=urls.length){ onFail('Connection failed. Is the TV on, on the same Wi-Fi, and is the IP correct?'); return; }
-  var url=urls[i];
-  var isRelay=url.indexOf('127.0.0.1:8765')>=0;
-  var label=isRelay?'local relay':(url.indexOf('wss:')===0?'wss://:3001':'ws://:3000');
+  var entry=urls[i], url=entry.url;
+  var isRelay=!!entry.relay;
+  var label=entry.label;
   setStatus('Connecting to '+ip+'… ('+label+')');
   dlog('try '+label);
   var sock, opened=false, settled=false, timer=null;
   function next(){ if(!settled){ settled=true; if(timer) clearTimeout(timer); try{ sock.close(); }catch(e){} if(throttled){ setBusy(false); return; } tryUrl(ip, urls, i+1); } }
   timer=setTimeout(next, 7000);
-  try{ sock=new WebSocket(url); }catch(e){ next(); return; }
+  try{ sock=(entry.via==='iframe')?new Sock(url):new WebSocket(url); }catch(e){ next(); return; }
   sock.onopen=function(){
     opened=true; settled=true; clearTimeout(timer);
     ws=sock; viaRelay=isRelay;
@@ -434,7 +498,7 @@ function onFail(msg){
   setBusy(false);
   var ip=$('ip').value.trim();
   setPill('Failed','');
-  setStatus(msg+' Tip: the page tries a local relay first — make sure relay.py is running in a-Shell (python3 relay.py). Also check: Settings → Network → LG Connect Apps is ON.', true);
+  setStatus(msg+' Tip: the page tries a direct connection first, then a local relay — if it falls back to the relay, make sure relay.py is running in a-Shell (python3 relay.py). Also check: Settings → Network → LG Connect Apps is ON.', true);
 }
 
 function onMessage(ev){
@@ -490,12 +554,12 @@ function onPaired(){
   setStatus('');
   setupEl.classList.add('hidden'); remoteEl.classList.remove('hidden');
   startHeartbeat();
-  // open the button/input socket for D-pad keys (via relay too, same Origin issue)
+  // open the button/input socket for D-pad keys (same null-origin route when direct)
   request('ssap://com.webos.service.networkinput/getPointerInputSocket').then(function(p){
     if(p && p.socketPath){
       var purl = viaRelay ? relayUrl(p.socketPath) : p.socketPath;
-      dlog('pointer via '+(viaRelay?'relay':'direct'));
-      ptrWs=new WebSocket(purl);
+      dlog('pointer via '+(viaRelay?'relay':'direct (null origin)'));
+      ptrWs = viaRelay ? new WebSocket(purl) : new Sock(purl);
       ptrWs.onopen=function(){ ptrReady=true; };
       ptrWs.onclose=function(){ ptrReady=false; };
       ptrWs.onerror=function(){ ptrReady=false; };

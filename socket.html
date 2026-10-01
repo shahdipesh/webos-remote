@@ -1,0 +1,40 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>sock</title></head><body><script>
+"use strict";
+// This file is loaded inside <iframe sandbox="allow-scripts">, which gives
+// it an opaque origin. WebSocket handshakes from here therefore carry
+// "Origin: null" -- and this TV accepts that (verified with relay.py --probe),
+// so the remote page can talk to the TV directly with no relay process.
+// Tiny postMessage protocol, one logical socket per id:
+//   parent -> {t:'connect', id, url} | {t:'send', id, data} | {t:'close', id}
+//   iframe -> {t:'ready'} | {t:'open', id} | {t:'msg', id, data} | {t:'closed', id, code}
+var sockets = {};
+function post(t, id, extra) {
+  var m = { t: t, id: id };
+  if (extra) for (var k in extra) m[k] = extra[k];
+  window.parent.postMessage(m, "*");
+}
+function closeId(id) {
+  var s = sockets[id];
+  if (s) { delete sockets[id]; try { s.close(); } catch (x) {} }
+}
+window.addEventListener("message", function (e) {
+  var d = e.data || {}, id = d.id;
+  if (d.t === "connect") {
+    closeId(id);
+    var ws;
+    try { ws = new WebSocket(d.url); } catch (err) { post("closed", id, { code: 0 }); return; }
+    sockets[id] = ws;
+    ws.onopen = function () { post("open", id); };
+    ws.onmessage = function (ev) { post("msg", id, { data: ev.data }); };
+    ws.onclose = function (ev) { closeId(id); post("closed", id, { code: ev.code || 0 }); };
+    ws.onerror = function () { /* onclose follows with the code */ };
+  } else if (d.t === "send") {
+    var s = sockets[id];
+    if (s && s.readyState === 1) { try { s.send(d.data); } catch (x) {} }
+  } else if (d.t === "close") {
+    closeId(id);
+  }
+});
+post("ready", "");
+</script></body></html>
