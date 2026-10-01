@@ -61,6 +61,7 @@
   .apps{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;}
   #status{font-size:13px;color:var(--dim);text-align:center;min-height:20px;line-height:1.4;}
   #status.err{color:var(--accent);}
+  #dbg{font:10px/1.6 monospace;color:var(--dim);text-align:left;white-space:pre-wrap;max-height:150px;overflow:auto;margin-top:6px;}
   .hidden{display:none !important;}
   .hint{font-size:12px;color:var(--dim);line-height:1.6;}
   .hint code{background:var(--btn);padding:2px 6px;border-radius:6px;color:var(--text);font-size:12px;}
@@ -156,6 +157,7 @@
   </div>
 
   <div id="status"></div>
+  <div id="dbg"></div>
 </div>
 
 <script>
@@ -170,18 +172,142 @@ var pill=$('pill'), statusEl=$('status'), setupEl=$('setup'), remoteEl=$('remote
 
 function setPill(txt, cls){ pill.textContent=txt; pill.className='pill'+(cls?' '+cls:''); }
 function setStatus(txt, isErr){ statusEl.textContent=txt||''; statusEl.className=isErr?'err':''; }
+function dlog(s){ var el=$('dbg'); if(!el) return; var t=new Date(); var p=function(n){return ('0'+n).slice(-2);};
+  var lines=(el.textContent+'').split('\n'); lines.push(p(t.getHours())+':'+p(t.getMinutes())+':'+p(t.getSeconds())+' '+s);
+  while(lines.length>14) lines.shift(); el.textContent=lines.join('\n'); }
 
 var MANIFEST={
-  "forcePairing": false,
-  "pairingType": "PROMPT",
-  "manifest": {
-    "manifestVersion": 1,
-    "appVersion": "1.0",
-    "permissions": ["LAUNCH","LAUNCH_WEBAPP","APP_TO_APP","CLOSE","TEST_OPEN","TEST_PROTECTED","CONTROL_AUDIO","CONTROL_DISPLAY","CONTROL_INPUT_JOYSTICK","CONTROL_INPUT_MEDIA_RECORDING","CONTROL_INPUT_MEDIA_PLAYBACK","CONTROL_INPUT_TV","CONTROL_POWER","READ_APP_STATUS","READ_CURRENT_CHANNEL","READ_INPUT_DEVICE_LIST","READ_NETWORK_STATE","READ_RUNNING_APPS","READ_TV_CHANNEL_LIST","WRITE_NOTIFICATION_TOAST","READ_POWER_STATE","READ_COUNTRY_INFO","READ_SETTINGS","CONTROL_TV_SCREEN","CONTROL_TV_STANBY","CONTROL_FAVORITE_GROUP","CONTROL_USER_INFO","CHECK_BLUETOOTH_DEVICE","CONTROL_BLUETOOTH","CONTROL_TIMER_INFO","STB_INTERNAL_CONNECTION","CONTROL_RECORDING","READ_RECORDING_STATE","WRITE_RECORDING_LIST","READ_RECORDING_LIST","READ_RECORDING_SCHEDULE","WRITE_RECORDING_SCHEDULE","READ_STORAGE_DEVICE_LIST","READ_TV_PROGRAM_INFO","CONTROL_BOX_CHANNEL","READ_TV_ACR_AUTH_TOKEN","READ_TV_CONTENT_STATE","READ_TV_CURRENT_TIME","ADD_LAUNCHER_CHANNEL","SET_CHANNEL_SKIP","RELEASE_CHANNEL_SKIP","CONTROL_CHANNEL_BLOCK","DELETE_SELECT_CHANNEL","CONTROL_CHANNEL_GROUP","SCAN_TV_CHANNELS","CONTROL_TV_POWER","CONTROL_WOL","CONTROL_INPUT_TEXT","CONTROL_MOUSE_AND_KEYBOARD"]
-  }
+ "forcePairing": false,
+ "pairingType": "PROMPT",
+ "manifest": {
+  "manifestVersion": 1,
+  "appVersion": "1.1",
+  "signed": {
+   "created": "20140509",
+   "appId": "com.lge.test",
+   "vendorId": "com.lge",
+   "localizedAppNames": {
+    "": "LG Remote App",
+    "ko-KR": "\ub9ac\ubaa8\ucee8 \uc571",
+    "zxx-XX": "\u041b\u0413 R\u044d\u043cot\u044d A\u041f\u041f"
+   },
+   "localizedVendorNames": {
+    "": "LG Electronics"
+   },
+   "permissions": [
+    "TEST_SECURE",
+    "CONTROL_INPUT_TEXT",
+    "CONTROL_MOUSE_AND_KEYBOARD",
+    "READ_INSTALLED_APPS",
+    "READ_LGE_SDX",
+    "READ_NOTIFICATIONS",
+    "SEARCH",
+    "WRITE_SETTINGS",
+    "WRITE_NOTIFICATION_ALERT",
+    "CONTROL_POWER",
+    "READ_CURRENT_CHANNEL",
+    "READ_RUNNING_APPS",
+    "READ_UPDATE_INFO",
+    "UPDATE_FROM_REMOTE_APP",
+    "READ_LGE_TV_INPUT_EVENTS",
+    "READ_TV_CURRENT_TIME"
+   ],
+   "serial": "2f930e2d2cfe083771f68e4fe7bb07"
+  },
+  "permissions": [
+   "LAUNCH",
+   "LAUNCH_WEBAPP",
+   "APP_TO_APP",
+   "CLOSE",
+   "TEST_OPEN",
+   "TEST_PROTECTED",
+   "CONTROL_AUDIO",
+   "CONTROL_DISPLAY",
+   "CONTROL_INPUT_JOYSTICK",
+   "CONTROL_INPUT_MEDIA_RECORDING",
+   "CONTROL_INPUT_MEDIA_PLAYBACK",
+   "CONTROL_INPUT_TV",
+   "CONTROL_POWER",
+   "READ_APP_STATUS",
+   "READ_CURRENT_CHANNEL",
+   "READ_INPUT_DEVICE_LIST",
+   "READ_NETWORK_STATE",
+   "READ_RUNNING_APPS",
+   "READ_TV_CHANNEL_LIST",
+   "WRITE_NOTIFICATION_TOAST",
+   "READ_POWER_STATE",
+   "READ_COUNTRY_INFO",
+   "READ_SETTINGS",
+   "CONTROL_TV_SCREEN",
+   "CONTROL_TV_STANBY",
+   "CONTROL_FAVORITE_GROUP",
+   "CONTROL_USER_INFO",
+   "CHECK_BLUETOOTH_DEVICE",
+   "CONTROL_BLUETOOTH",
+   "CONTROL_TIMER_INFO",
+   "STB_INTERNAL_CONNECTION",
+   "CONTROL_RECORDING",
+   "READ_RECORDING_STATE",
+   "WRITE_RECORDING_LIST",
+   "READ_RECORDING_LIST",
+   "READ_RECORDING_SCHEDULE",
+   "WRITE_RECORDING_SCHEDULE",
+   "READ_STORAGE_DEVICE_LIST",
+   "READ_TV_PROGRAM_INFO",
+   "CONTROL_BOX_CHANNEL",
+   "READ_TV_ACR_AUTH_TOKEN",
+   "READ_TV_CONTENT_STATE",
+   "READ_TV_CURRENT_TIME",
+   "ADD_LAUNCHER_CHANNEL",
+   "SET_CHANNEL_SKIP",
+   "RELEASE_CHANNEL_SKIP",
+   "CONTROL_CHANNEL_BLOCK",
+   "DELETE_SELECT_CHANNEL",
+   "CONTROL_CHANNEL_GROUP",
+   "SCAN_TV_CHANNELS",
+   "CONTROL_TV_POWER",
+   "CONTROL_WOL"
+  ],
+  "signatures": [
+   {
+    "signatureVersion": 1,
+    "signature": "eyJhbGdvcml0aG0iOiJSU0EtU0hBMjU2Iiwia2V5SWQiOiJ0ZXN0LXNpZ25pbmctY2VydCIsInNpZ25hdHVyZVZlcnNpb24iOjF9.hrVRgjCwXVvE2OOSpDZ58hR+59aFNwYDyjQgKk3auukd7pcegmE2CzPCa0bJ0ZsRAcKkCTJrWo5iDzNhMBWRyaMOv5zWSrthlf7G128qvIlpMT0YNY+n/FaOHE73uLrS/g7swl3/qH/BGFG2Hu4RlL48eb3lLKqTt2xKHdCs6Cd4RMfJPYnzgvI4BNrFUKsjkcu+WD4OO2A27Pq1n50cMchmcaXadJhGrOqH5YmHdOCj5NSHzJYrsW0HPlpuAx/ECMeIZYDh6RMqaFM2DXzdKX9NmmyqzJ3o/0lkk/N97gfVRLW5hA29yeAwaCViZNCP8iC9aO0q9fQojoa7NQnAtw=="
+   }
+  ]
+ }
 };
 
 function cid(){ seq++; return 'app_'+seq+'_'+Date.now().toString(16); }
+
+function manifestFor(unsigned){
+  var m=JSON.parse(JSON.stringify(MANIFEST));
+  if(unsigned){
+    delete m.manifest.signed;
+    delete m.manifest.signatures;
+    m.manifest.appVersion="1.0";
+    m.manifest.permissions.push("CONTROL_INPUT_TEXT","CONTROL_MOUSE_AND_KEYBOARD");
+  }
+  return m;
+}
+function sendRegister(unsigned){
+  var payload=manifestFor(unsigned);
+  var key=null;
+  try{ key=localStorage.getItem(LS_KEY); }catch(e){}
+  if(key){ payload['client-key']=key; }
+  var rid=cid();
+  pending[rid]={resolve:function(){}, reject:function(e){
+    if(!unsigned && /403.*blacklist/i.test(e.message||'')){
+      dlog('signed cert blacklisted by TV, retrying unsigned');
+      setStatus('Retrying with unsigned pairing…');
+      sendRegister(true);
+      return;
+    }
+    setStatus('Pairing rejected by TV: '+e.message, true);
+  }};
+  try{ ws.send(JSON.stringify({id:rid, type:'register', payload:payload})); }
+  catch(e){ setStatus('Send failed.', true); return; }
+  dlog('sent register ('+(unsigned?'unsigned':'signed+signatures')+')');
+}
 
 function connect(){
   var ip=$('ip').value.trim();
@@ -197,6 +323,7 @@ function tryUrl(ip, urls, i){
   if(i>=urls.length){ onFail('Connection failed. Is the TV on, on the same Wi-Fi, and is the IP correct?'); return; }
   var secure=(urls[i].indexOf('wss:')===0);
   setStatus('Connecting to '+ip+'… (port '+(secure?'3001 secure':'3000')+')');
+  dlog('try '+(secure?'wss://:3001':'ws://:3000'));
   var sock, opened=false, settled=false, timer=null;
   function next(){ if(!settled){ settled=true; if(timer) clearTimeout(timer); try{ sock.close(); }catch(e){} tryUrl(ip, urls, i+1); } }
   timer=setTimeout(next, 7000);
@@ -210,12 +337,13 @@ function tryUrl(ip, urls, i){
     if(key){ payload['client-key']=key; }
     var rid=cid();
     pending[rid]={resolve:function(){}, reject:function(e){ setStatus('Pairing rejected by TV: '+e.message, true); }};
-    ws.send(JSON.stringify({id:rid, type:'register', payload:payload}));
+    sendRegister(false);
     setStatus('Waiting for TV…');
   };
   sock.onmessage=onMessage;
   sock.onerror=function(){ if(!opened) next(); };
   sock.onclose=function(ev){
+    dlog('close code='+(ev&&ev.code));
     if(!opened){ next(); return; }
     onWsClose(ev);
   };
@@ -241,6 +369,7 @@ function onFail(msg){
 
 function onMessage(ev){
   var m; try{ m=JSON.parse(ev.data); }catch(e){ return; }
+  dlog('recv '+(m.type||'?')+(m.error?(' err='+m.error):''));
   if(m.type==='error'){
     var emsg=m.error||(m.payload&&(m.payload.errorText||m.payload.errorCode))||'unknown error';
     if(m.id && pending[m.id]){ var cbe=pending[m.id]; delete pending[m.id]; try{cbe.reject(new Error(emsg));}catch(e){} }
