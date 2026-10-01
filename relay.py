@@ -16,10 +16,13 @@ The page connects to ws://127.0.0.1:8765/?target=<urlencoded ws/wss URL>
 and the relay dials that target. Stdlib only, no pip packages needed.
 """
 import functools
+import json
 import os
 import socket
 import ssl
+import sys
 import threading
+import time
 import hashlib
 import base64
 import struct
@@ -192,7 +195,90 @@ def handle(page):
         log("closed")
 
 
+def probe(tv_host):
+    """One-time experiment: which handshake headers does the TV accept?
+
+    The relay works because it sends NO Origin header. If the TV also
+    accepts 'Origin: null' (+ a Safari UA, i.e. what a sandboxed iframe
+    would send), the page can talk to the TV directly and the relay can
+    be deleted entirely.
+    """
+    safari_ua = ("Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) "
+                 "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 "
+                 "Mobile/15E148 Safari/604.1")
+    variants = [
+        ("no Origin, no User-Agent  [baseline: what the relay sends]", {}),
+        ("Origin: null", {"Origin": "null"}),
+        ("Origin: null + Safari iPhone UA  [simulates sandboxed iframe]",
+         {"Origin": "null", "User-Agent": safari_ua}),
+        ("Origin: http://127.0.0.1:8000 + Safari UA  [simulates the page]",
+         {"Origin": "http://127.0.0.1:8000", "User-Agent": safari_ua}),
+    ]
+    manifest = {"manifestVersion": 1, "signatures": [
+        {"signatureVersion": 1, "appId": "com.lge.test",
+         "vendorId": "com.lge", "signature": "LEGACY"}]}
+    for i, (name, extra) in enumerate(variants):
+        if i:
+            time.sleep(4)  # stay clear of the TV's pairing throttle
+        print("---", name, flush=True)
+        tv = None
+        try:
+            raw = socket.create_connection((tv_host, 3001), timeout=8)
+            ctx = ssl._create_unverified_context()
+            tv = ctx.wrap_socket(raw, server_hostname=tv_host)
+            ckey = base64.b64encode(secrets.token_bytes(16)).decode()
+            head = ["GET / HTTP/1.1", "Host: %s:3001" % tv_host,
+                    "Upgrade: websocket", "Connection: Upgrade",
+                    "Sec-WebSocket-Key: " + ckey, "Sec-WebSocket-Version: 13"]
+            for k, v in extra.items():
+                head.append(k + ": " + v)
+            tv.sendall(("\r\n".join(head) + "\r\n\r\n").encode())
+            resp, _ = read_http(tv)
+            if "101" not in resp:
+                print("    handshake refused:", resp[:60], flush=True)
+                continue
+            reg = {"id": "probe", "type": "register",
+                   "payload": {"forcePairing": False, "pairingType": "PIN",
+                               "client-key": "", "manifest": manifest}}
+            send_frame(tv, 0x1, json.dumps(reg).encode())
+            tv.settimeout(5)
+            verdict = "no answer, connection stayed OPEN"
+            try:
+                while True:
+                    op, payload = read_frame(tv)
+                    if op == 0x8:
+                        code = int.from_bytes(payload[:2], "big") if len(payload) >= 2 else 0
+                        verdict = "CLOSED by TV (code %d)" % code
+                        break
+                    elif op == 0x1:
+                        try:
+                            m = json.loads(payload.decode())
+                        except ValueError:
+                            m = {}
+                        p = m.get("payload") or {}
+                        if p.get("errorCode") == "403":
+                            verdict = "THROTTLED by TV (403: too many pairing requests)"
+                        else:
+                            verdict = "OPEN, TV answered: %s" % str(m)[:110]
+                        break
+            except socket.timeout:
+                pass
+            print("   ", verdict, flush=True)
+        except (OSError, ConnectionError) as e:
+            print("    error:", e, flush=True)
+        finally:
+            if tv is not None:
+                try:
+                    tv.close()
+                except OSError:
+                    pass
+    print("done.")
+
+
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "--probe":
+        probe(sys.argv[2] if len(sys.argv) > 2 else "10.0.0.40")
+        return
     here = os.path.dirname(os.path.abspath(__file__))
     # Relay first -- this is the critical path.
     srv = None
