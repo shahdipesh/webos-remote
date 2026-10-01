@@ -194,11 +194,11 @@
 <script>
 (function(){
 "use strict";
-var APP_VER='v14';
+var APP_VER='v15';
 // Cache the page for offline loads: iOS pauses a-Shell in the background,
 // which also stops its file server. The service worker serves the cached
-// page so it still opens; the relay is only needed for actual commands.
-if('serviceWorker' in navigator && location.protocol==='http:'){
+// page so it still opens; the relay is only needed as a fallback.
+if('serviceWorker' in navigator && window.isSecureContext){
   navigator.serviceWorker.register('sw.js').catch(function(){});
 }
 var LS_IP='webos_tv_ip', LS_KEY='webos_client_key';
@@ -700,10 +700,12 @@ $('stop').addEventListener('click', function(){ cmd('ssap://media.controls/stop'
 $('rw').addEventListener('click', function(){ cmd('ssap://media.controls/rewind',{},'rewind'); });
 $('ff').addEventListener('click', function(){ cmd('ssap://media.controls/fastForward',{},'fast forward'); });
 
-// prefill saved IP
+// prefill saved IP (a ?tv=1.2.3.4 share link overrides the saved one)
 try{
   var saved=localStorage.getItem(LS_IP);
   if(saved) $('ip').value=saved;
+  var qm=/[?&]tv=([^&]+)/.exec(location.search);
+  if(qm){ var tip=decodeURIComponent(qm[1]).trim(); if(tip) $('ip').value=tip; }
 }catch(e){}
 })();
 </script>
