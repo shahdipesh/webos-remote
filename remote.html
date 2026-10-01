@@ -199,7 +199,7 @@
 <script>
 (function(){
 "use strict";
-var APP_VER='v17';
+var APP_VER='v18';
 // Cache the page for offline loads: iOS pauses a-Shell in the background,
 // which also stops its file server. The service worker serves the cached
 // page so it still opens; the relay is only needed as a fallback.
@@ -690,10 +690,10 @@ function press(name){
     delete pts[e.pointerId];
     var left=Object.keys(pts).length;
     if(left===0){
-      if(g && g.mode==='move' && n===1 && (Date.now()-g.t)<400 && g.moved<24) doClick();
+      if(g && g.mode==='move' && !g.noTap && n===1 && (Date.now()-g.t)<400 && g.moved<24) doClick();
       gesture=null; pad.classList.remove('active');
     }else if(left===1 && g && g.mode==='scroll'){
-      gesture={mode:'move',t:Date.now(),moved:0,sync:true}; // re-sync: swallow the next delta
+      gesture={mode:'move',t:Date.now(),moved:0,sync:true,noTap:true}; // re-sync: swallow the next delta; never a tap after scrolling
     }
   }
   pad.addEventListener('pointerup', up);
