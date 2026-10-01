@@ -193,18 +193,28 @@ def handle(page):
 
 
 def main():
-    # Serve remote.html (and anything else in this folder) on :8000
     here = os.path.dirname(os.path.abspath(__file__))
-    handler = functools.partial(SimpleHTTPRequestHandler, directory=here)
-    httpd = ThreadingHTTPServer(WEB, handler)
-    threading.Thread(target=httpd.serve_forever, daemon=True).start()
-    log("serving page on http://%s:%d/remote.html" % WEB)
-
-    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    srv.bind(LISTEN)
-    srv.listen(5)
-    log("listening on %s:%d -- page connects with ?target=<ws/wss url>" % LISTEN)
+    # Relay first -- this is the critical path.
+    srv = None
+    try:
+        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.bind(LISTEN)
+        srv.listen(5)
+        log("relay listening on %s:%d -- page connects with ?target=<ws/wss url>" % LISTEN)
+    except OSError as e:
+        log("relay port busy (%s): is another relay.py already running? continuing without relay." % e)
+    # File server is best-effort: if :8000 is taken by another server, that's fine.
+    try:
+        handler = functools.partial(SimpleHTTPRequestHandler, directory=here)
+        httpd = ThreadingHTTPServer(WEB, handler)
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        log("serving page on http://%s:%d/remote.html" % WEB)
+    except OSError as e:
+        log("web port busy (%s): serve the page another way." % e)
+    if srv is None:
+        log("no relay socket, exiting")
+        return
     while True:
         conn, _ = srv.accept()
         threading.Thread(target=handle, args=(conn,), daemon=True).start()
