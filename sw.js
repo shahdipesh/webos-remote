@@ -1,7 +1,7 @@
 // Serves the cached page (remote.html + socket.html) when a-Shell (and its
 // file server) is asleep. Each ?v=N version is cached under its own URL, so
 // updates still work: just open the new versioned URL once while online.
-var CACHE = 'tvremote-v2';
+var CACHE = 'tvremote-v3';
 
 self.addEventListener('install', function (e) { self.skipWaiting(); });
 

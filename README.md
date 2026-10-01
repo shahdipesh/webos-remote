@@ -33,7 +33,7 @@ Implements the webOS pairing handshake (`type: register` with the standard test 
 - `ssap://system/turnOff`, `ssap://system.launcher/launch`
 - `ssap://tv/channelUp` / `channelDown`
 - `ssap://media.controls/play|pause|stop|rewind|fastForward`
-- D-pad keys via `ssap://com.webos.service.networkinput/getPointerInputSocket` (`type:button` messages)
+- Pointer input via `ssap://com.webos.service.networkinput/getPointerInputSocket`: touchpad cursor (`type:move`), tap-to-click (`type:click`), two-finger scroll (`type:scroll`), plus Back/Home/Exit keys (`type:button` messages)
 
 ## How the page reaches the TV
 

@@ -54,10 +54,13 @@
   .btn.small{font-size:13px;padding:10px 8px;border-radius:10px;}
   .row{display:flex;gap:10px;}
   .row .btn{flex:1;}
-  .dpad{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;max-width:300px;margin:0 auto;}
-  .dpad .btn{aspect-ratio:1.35;border-radius:16px;font-size:20px;}
-  .dpad .ok{background:#34343f;font-size:15px;}
-  .sidebtns{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;}
+  #pad{
+    height:230px;background:var(--btn);border:1px solid #34343f;border-radius:16px;
+    touch-action:none;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none;
+    display:flex;align-items:center;justify-content:center;cursor:pointer;
+  }
+  #pad .padhint{color:var(--dim);font-size:13px;line-height:1.7;pointer-events:none;text-align:center;padding:0 24px;}
+  #pad.active .padhint{opacity:0;}
   .volch{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
   .volch .col{display:flex;flex-direction:column;gap:10px;}
   .volval{text-align:center;font-size:13px;color:var(--dim);font-weight:600;min-height:18px;}
@@ -114,14 +117,11 @@
     </div>
 
     <div class="card">
-      <h2>Navigate</h2>
-      <div class="dpad">
-        <div></div><button class="btn" data-key="UP">▲</button><div></div>
-        <button class="btn" data-key="LEFT">◀</button><button class="btn ok" data-key="ENTER">OK</button><button class="btn" data-key="RIGHT">▶</button>
-        <div></div><button class="btn" data-key="DOWN">▼</button><div></div>
-      </div>
+      <h2>Touchpad</h2>
+      <div id="pad"><span class="padhint">Drag to move the cursor<br>Tap to click &middot; two fingers to scroll</span></div>
       <div style="height:10px"></div>
-      <div class="sidebtns">
+      <div class="row">
+        <button class="btn small" id="padClick">Click</button>
         <button class="btn small" data-key="BACK">← Back</button>
         <button class="btn small" data-key="HOME">⌂ Home</button>
         <button class="btn small" data-key="EXIT">Exit</button>
@@ -194,7 +194,7 @@
 <script>
 (function(){
 "use strict";
-var APP_VER='v15';
+var APP_VER='v16';
 // Cache the page for offline loads: iOS pauses a-Shell in the background,
 // which also stops its file server. The service worker serves the cached
 // page so it still opens; the relay is only needed as a fallback.
@@ -619,10 +619,76 @@ function startHeartbeat(){ stopHeartbeat(); hbTimer=setInterval(heartbeat, 10000
 function stopHeartbeat(){ if(hbTimer){ clearInterval(hbTimer); hbTimer=null; } asleep=false; }
 
 function press(name){
-  if(!ptrReady || !ptrWs || ptrWs.readyState!==1){ setStatus('D-pad not ready yet — wait a second and retry.', true); return; }
+  if(!ptrReady || !ptrWs || ptrWs.readyState!==1){ setStatus('Pointer not ready yet — wait a second and retry.', true); return; }
   try{ ptrWs.send('type:button\nname:'+name+'\n\n'); setStatus(''); }
-  catch(e){ setStatus('D-pad send failed.', true); }
+  catch(e){ setStatus('Pointer send failed.', true); }
 }
+
+// Touchpad: one finger drag = move the TV cursor, tap = click,
+// two-finger drag = scroll. Same pointer socket the D-pad used, so no
+// new permissions or pairing are needed.
+(function(){
+  var pad=$('pad'); if(!pad) return;
+  var pts={}, gesture=null, accX=0, accY=0, accS=0, flushOn=false;
+  var SENS=2.2, SSENS=3; // finger px -> cursor px multipliers
+  function ptrOk(){ return ptrReady && ptrWs && ptrWs.readyState===1; }
+  function flush(){
+    flushOn=false;
+    var mx=Math.round(accX*SENS), my=Math.round(accY*SENS), sy=Math.round(accS*SSENS);
+    accX=0; accY=0; accS=0;
+    if(!ptrOk() || (!mx && !my && !sy)) return;
+    try{
+      if(mx||my) ptrWs.send('type:move\ndx:'+mx+'\ndy:'+my+'\n\n');
+      if(sy) ptrWs.send('type:scroll\ndx:0\ndy:'+sy+'\n\n');
+    }catch(e){}
+  }
+  function queue(dx,dy,ds){
+    accX+=dx; accY+=dy; accS+=ds;
+    if(!flushOn){ flushOn=true; requestAnimationFrame(flush); }
+  }
+  function avgY(){ var s=0,n=0; for(var k in pts){ s+=pts[k].y; n++; } return n?s/n:0; }
+  function doClick(){
+    if(ptrOk()){ try{ ptrWs.send('type:click\n\n'); }catch(e){} }
+    else setStatus('Pointer not ready yet — wait a second and retry.', true);
+  }
+  pad.addEventListener('pointerdown', function(e){
+    try{ pad.setPointerCapture(e.pointerId); }catch(x){}
+    pts[e.pointerId]={x:e.clientX,y:e.clientY};
+    var n=Object.keys(pts).length;
+    if(n===1){ gesture={mode:'move',t:Date.now(),moved:0}; pad.classList.add('active'); }
+    else if(n===2){ gesture={mode:'scroll',sy:avgY(),moved:0}; }
+  });
+  pad.addEventListener('pointermove', function(e){
+    var p=pts[e.pointerId]; if(!p||!gesture) return;
+    if(gesture.mode==='move'){
+      if(gesture.sync){ p.x=e.clientX; p.y=e.clientY; gesture.sync=false; return; }
+      var dx=e.clientX-p.x, dy=e.clientY-p.y;
+      p.x=e.clientX; p.y=e.clientY;
+      gesture.moved+=Math.abs(dx)+Math.abs(dy);
+      if(dx||dy) queue(dx,dy,0);
+    }else if(gesture.mode==='scroll'){
+      var y=avgY(), dy2=y-gesture.sy; gesture.sy=y;
+      p.x=e.clientX; p.y=e.clientY;
+      gesture.moved+=Math.abs(dy2);
+      if(dy2) queue(0,0,dy2);
+    }
+  });
+  function up(e){
+    var g=gesture, n=Object.keys(pts).length;
+    delete pts[e.pointerId];
+    var left=Object.keys(pts).length;
+    if(left===0){
+      if(g && g.mode==='move' && n===1 && (Date.now()-g.t)<350 && g.moved<16) doClick();
+      gesture=null; pad.classList.remove('active');
+    }else if(left===1 && g && g.mode==='scroll'){
+      gesture={mode:'move',t:Date.now(),moved:0,sync:true}; // re-sync: swallow the next delta
+    }
+  }
+  pad.addEventListener('pointerup', up);
+  pad.addEventListener('pointercancel', up);
+  pad.addEventListener('contextmenu', function(e){ e.preventDefault(); });
+  $('padClick').addEventListener('click', doClick);
+})();
 
 function cmd(uri, payload, label){
   setStatus(label?('Sending '+label+'…'):'');
