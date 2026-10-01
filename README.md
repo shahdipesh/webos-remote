@@ -38,13 +38,13 @@ Implements the webOS pairing handshake (`type: register` with the standard test 
 ## relay.py — fixes instant disconnect (code 1008)
 
 Some TV firmware instantly closes any WebSocket carrying a browser `Origin`
-header, while native remote apps pair fine. `relay.py` works around it:
+header, while native remote apps pair fine. `relay.py` works around it, and it
+also serves the page itself — one command does everything:
 
-1. In a-Shell, second window (keep the http server running in the first):
-   `python3 relay.py`
-2. Open the remote page and tap Connect. The page uses the relay automatically
-   (`ws://127.0.0.1:8765/?target=...`), which re-opens the connection to the TV
-   with no `Origin` header — just like a native app.
+1. In a-Shell: `python3 relay.py`
+2. In Safari: `http://127.0.0.1:8000/remote.html` → Connect.
 
-Stdlib only, no packages to install. If the relay isn't running, the page falls
-back to a direct connection automatically.
+The page talks to the relay at `ws://127.0.0.1:8765/?target=...`, which
+re-opens the connection to the TV with no `Origin` header — just like a native
+app. Stdlib only, no packages to install. If the relay isn't running, the page
+falls back to a direct connection automatically.
