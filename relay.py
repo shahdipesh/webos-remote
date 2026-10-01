@@ -7,12 +7,16 @@ that carries a browser Origin header. Native remote apps don't send one, so
 they pair fine. This relay accepts a plain local WebSocket from the page and
 re-opens it toward the TV with NO Origin header, bridging frames both ways.
 
-Usage (in a-Shell, second window -- keep the http server running in the first):
+Usage (in a-Shell -- just one window, one command):
     python3 relay.py
+It serves the remote page on http://127.0.0.1:8000/remote.html AND runs the
+WebSocket relay on 127.0.0.1:8765. Open the page in Safari and tap Connect.
 
 The page connects to ws://127.0.0.1:8765/?target=<urlencoded ws/wss URL>
 and the relay dials that target. Stdlib only, no pip packages needed.
 """
+import functools
+import os
 import socket
 import ssl
 import threading
@@ -20,9 +24,11 @@ import hashlib
 import base64
 import struct
 import secrets
+from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 
 LISTEN = ("127.0.0.1", 8765)
+WEB = ("127.0.0.1", 8000)
 GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 
@@ -187,6 +193,13 @@ def handle(page):
 
 
 def main():
+    # Serve remote.html (and anything else in this folder) on :8000
+    here = os.path.dirname(os.path.abspath(__file__))
+    handler = functools.partial(SimpleHTTPRequestHandler, directory=here)
+    httpd = ThreadingHTTPServer(WEB, handler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    log("serving page on http://%s:%d/remote.html" % WEB)
+
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     srv.bind(LISTEN)
