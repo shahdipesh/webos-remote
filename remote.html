@@ -64,6 +64,8 @@
   #pad.tap{border-color:var(--ok);}
   .scrollpad{display:grid;grid-template-columns:repeat(3,64px);gap:8px;justify-content:center;}
   .scrollpad .btn{aspect-ratio:1.35;border-radius:14px;font-size:18px;}
+  .dpad{display:grid;grid-template-columns:repeat(3,64px);gap:8px;justify-content:center;}
+  .dpad .btn{aspect-ratio:1.35;border-radius:14px;font-size:18px;}
   .volch{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
   .volch .col{display:flex;flex-direction:column;gap:10px;}
   .volval{text-align:center;font-size:13px;color:var(--dim);font-weight:600;min-height:18px;}
@@ -132,6 +134,15 @@
         <button class="btn small" data-key="BACK">← Back</button>
         <button class="btn small" data-key="HOME">⌂ Home</button>
         <button class="btn small" data-key="EXIT">Exit</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>D-pad</h2>
+      <div class="dpad">
+        <div></div><button class="btn" data-key="UP">▲</button><div></div>
+        <button class="btn" data-key="LEFT">◀</button><button class="btn" data-key="ENTER">OK</button><button class="btn" data-key="RIGHT">▶</button>
+        <div></div><button class="btn" data-key="DOWN">▼</button><div></div>
       </div>
     </div>
 
@@ -211,7 +222,7 @@
 <script>
 (function(){
 "use strict";
-var APP_VER='v24';
+var APP_VER='v25';
 // Cache the page for offline loads: iOS pauses a-Shell in the background,
 // which also stops its file server. The service worker serves the cached
 // page so it still opens; the relay is only needed as a fallback.
