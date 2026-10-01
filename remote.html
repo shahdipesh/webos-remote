@@ -198,12 +198,21 @@ function connect(){
   try{ localStorage.setItem(LS_IP, ip); }catch(e){}
   disconnect(false);
   setPill('Connecting…','busy');
-  setStatus('Connecting to '+ip+'…');
-  var url='ws://'+ip+':3000';
-  try{ ws=new WebSocket(url); }catch(e){ onFail('Could not open connection.'); return; }
-  var opened=false;
-  ws.onopen=function(){
-    opened=true;
+  // newer firmware only listens on the secure port 3001; older sets use plain 3000
+  tryUrl(ip, ['wss://'+ip+':3001','ws://'+ip+':3000'], 0);
+}
+
+function tryUrl(ip, urls, i){
+  if(i>=urls.length){ onFail('Connection failed. Is the TV on, on the same Wi-Fi, and is the IP correct?'); return; }
+  var secure=(urls[i].indexOf('wss:')===0);
+  setStatus('Connecting to '+ip+'… (port '+(secure?'3001 secure':'3000')+')');
+  var sock, opened=false, settled=false, timer=null;
+  function next(){ if(!settled){ settled=true; if(timer) clearTimeout(timer); try{ sock.close(); }catch(e){} tryUrl(ip, urls, i+1); } }
+  timer=setTimeout(next, 7000);
+  try{ sock=new WebSocket(urls[i]); }catch(e){ next(); return; }
+  sock.onopen=function(){
+    opened=true; settled=true; clearTimeout(timer);
+    ws=sock;
     var payload=JSON.parse(JSON.stringify(MANIFEST));
     var key=null;
     try{ key=localStorage.getItem(LS_KEY); }catch(e){}
@@ -211,21 +220,29 @@ function connect(){
     ws.send(JSON.stringify({id:cid(), type:'register', payload:payload}));
     setStatus('Waiting for TV…');
   };
-  ws.onmessage=onMessage;
-  ws.onerror=function(){ if(!opened) onFail('Connection failed. Is the TV on, on the same Wi-Fi, and is the IP correct?'); };
-  ws.onclose=function(){
-    isConnected=false; ptrReady=false;
-    if(ptrWs){ try{ptrWs.close();}catch(e){} ptrWs=null; }
-    for(var k in pending){ try{pending[k].reject(new Error('disconnected'));}catch(e){} }
-    pending={};
-    setPill('Disconnected','');
-    remoteEl.classList.add('hidden'); setupEl.classList.remove('hidden');
-    if(opened) setStatus('Disconnected.', false);
+  sock.onmessage=onMessage;
+  sock.onerror=function(){ if(!opened) next(); };
+  sock.onclose=function(){
+    if(!opened){ next(); return; }
+    onWsClose();
   };
 }
 
+function onWsClose(){
+  ws=null;
+  isConnected=false; ptrReady=false;
+  if(ptrWs){ try{ptrWs.close();}catch(e){} ptrWs=null; }
+  for(var k in pending){ try{pending[k].reject(new Error('disconnected'));}catch(e){} }
+  pending={};
+  setPill('Disconnected','');
+  remoteEl.classList.add('hidden'); setupEl.classList.remove('hidden');
+  setStatus('Disconnected.', false);
+}
+
 function onFail(msg){
-  setPill('Failed',''); setStatus(msg+' Also check: Settings → Network → LG Connect Apps is ON.', true);
+  var ip=$('ip').value.trim();
+  setPill('Failed','');
+  setStatus(msg+' Tip: if your TV uses the secure port, open https://'+ip+':3001 in Safari once, accept the certificate warning, then tap Connect again. Also check: Settings → Network → LG Connect Apps is ON.', true);
 }
 
 function onMessage(ev){

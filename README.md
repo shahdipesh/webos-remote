@@ -24,7 +24,7 @@ a-Shell only needs to stay open until the page loads — afterwards the page tal
 
 - The TV must be **on** for the remote to connect. Power-on over the network isn't possible from a webpage (no Wake-on-LAN from browsers); everything else works.
 - The pairing key is stored in the browser's localStorage — you only accept the TV prompt once.
-- If `ws://<tv-ip>:3000` refuses to connect, your TV's firmware may only accept the secure socket (`wss://<tv-ip>:3001`, 2023+ models). Open `https://<tv-ip>:3001` in Safari once, accept the certificate warning, then retry.
+- The app tries the secure port first (`wss://<tv-ip>:3001`, 2023+ firmware) and falls back to the plain port (`ws://<tv-ip>:3000`). If the secure port fails, open `https://<tv-ip>:3001` in Safari once, accept the certificate warning, then retry.
 
 ## Protocol
 
