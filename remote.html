@@ -211,7 +211,7 @@
 <script>
 (function(){
 "use strict";
-var APP_VER='v22';
+var APP_VER='v23';
 // Cache the page for offline loads: iOS pauses a-Shell in the background,
 // which also stops its file server. The service worker serves the cached
 // page so it still opens; the relay is only needed as a fallback.
@@ -625,9 +625,13 @@ function heartbeat(){
 function startHeartbeat(){ stopHeartbeat(); hbTimer=setInterval(heartbeat, 10000); }
 function stopHeartbeat(){ if(hbTimer){ clearInterval(hbTimer); hbTimer=null; } asleep=false; }
 
-// Named keys (Back/Home/Exit/OK) go over the pointer socket as `type:button`
-// — the SSAP sendInputButton URI 404s on this TV's firmware. The socket is
-// re-acquired first if the TV dropped it while idle.
+// Home gets a fallback: this TV's firmware ignores pointer-socket button
+// presses (known limitation on some builds), so also launch the home app
+// directly — whichever path the TV honors wins.
+function goHome(){
+  press('HOME');
+  cmd('ssap://system.launcher/launch', {id:'com.webos.app.home'}, 'Home');
+}
 function press(name){
   ensurePtr(function(ok){
     if(!ok || !ptrOk()){ setStatus('Pointer not ready yet — wait a second and retry.', true); dlog(name+': pointer not ready'); return; }
@@ -828,7 +832,10 @@ $('kbEnter').addEventListener('click', kbEnter);
 
 var keyBtns=document.querySelectorAll('[data-key]');
 for(var i=0;i<keyBtns.length;i++){
-  (function(b){ b.addEventListener('click', function(){ press(b.getAttribute('data-key')); }); })(keyBtns[i]);
+  (function(b){ b.addEventListener('click', function(){
+    var k=b.getAttribute('data-key');
+    if(k==='HOME') goHome(); else press(k);
+  }); })(keyBtns[i]);
 }
 var appBtns=document.querySelectorAll('[data-app]');
 for(var j=0;j<appBtns.length;j++){
