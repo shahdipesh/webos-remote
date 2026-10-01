@@ -34,3 +34,17 @@ Implements the webOS pairing handshake (`type: register` with the standard test 
 - `ssap://tv/channelUp` / `channelDown`
 - `ssap://media.controls/play|pause|stop|rewind|fastForward`
 - D-pad keys via `ssap://com.webos.service.networkinput/getPointerInputSocket` (`type:button` messages)
+
+## relay.py — fixes instant disconnect (code 1008)
+
+Some TV firmware instantly closes any WebSocket carrying a browser `Origin`
+header, while native remote apps pair fine. `relay.py` works around it:
+
+1. In a-Shell, second window (keep the http server running in the first):
+   `python3 relay.py`
+2. Open the remote page and tap Connect. The page uses the relay automatically
+   (`ws://127.0.0.1:8765/?target=...`), which re-opens the connection to the TV
+   with no `Origin` header — just like a native app.
+
+Stdlib only, no packages to install. If the relay isn't running, the page falls
+back to a direct connection automatically.

@@ -100,7 +100,7 @@
         <button class="btn primary" id="pinSendBtn">Send</button>
       </div>
     </div>
-    <p class="hint" id="setupHint">First time: the TV should show a pairing prompt — accept it with your normal remote. If that fails, use PIN pairing.</p>
+    <p class="hint" id="setupHint">First time: the TV should show a pairing prompt — accept it with your normal remote. If that fails, use PIN pairing.<br><br>Needs <code>relay.py</code> running in a-Shell (<code>python3 relay.py</code>) — it fixes TVs that instantly reject browser connections.</p>
   </div>
 
   <!-- REMOTE -->
@@ -179,7 +179,8 @@
 (function(){
 "use strict";
 var LS_IP='webos_tv_ip', LS_KEY='webos_client_key';
-var ws=null, ptrWs=null, ptrReady=false, seq=0, isConnected=false;
+var ws=null, ptrWs=null, ptrReady=false, seq=0, isConnected=false, viaRelay=false;
+function relayUrl(target){ return 'ws://127.0.0.1:8765/?target='+encodeURIComponent(target); }
 var pending={};
 var pairingType='PROMPT', lastType='PROMPT';
 
@@ -358,23 +359,30 @@ function connect(type){
   try{ localStorage.setItem(LS_IP, ip); }catch(e){}
   disconnect(false);
   setPill('Connecting…','busy');
-  // newer firmware only listens on the secure port 3001; older sets use plain 3000
-  tryUrl(ip, ['wss://'+ip+':3001','ws://'+ip+':3000'], 0);
+  // Relay first: it strips the browser Origin header that some TV firmware
+  // rejects with an instant 1008 close. Falls back to a direct connection.
+  tryUrl(ip, [
+    relayUrl('wss://'+ip+':3001/'),
+    'wss://'+ip+':3001',
+    'ws://'+ip+':3000'
+  ], 0);
 }
 
 function tryUrl(ip, urls, i){
   if(i>=urls.length){ onFail('Connection failed. Is the TV on, on the same Wi-Fi, and is the IP correct?'); return; }
-  var secure=(urls[i].indexOf('wss:')===0);
-  setStatus('Connecting to '+ip+'… (port '+(secure?'3001 secure':'3000')+')');
-  dlog('try '+(secure?'wss://:3001':'ws://:3000'));
+  var url=urls[i];
+  var isRelay=url.indexOf('127.0.0.1:8765')>=0;
+  var label=isRelay?'local relay':(url.indexOf('wss:')===0?'wss://:3001':'ws://:3000');
+  setStatus('Connecting to '+ip+'… ('+label+')');
+  dlog('try '+label);
   var sock, opened=false, settled=false, timer=null;
   function next(){ if(!settled){ settled=true; if(timer) clearTimeout(timer); try{ sock.close(); }catch(e){} tryUrl(ip, urls, i+1); } }
   timer=setTimeout(next, 7000);
-  try{ sock=new WebSocket(urls[i]); }catch(e){ next(); return; }
+  try{ sock=new WebSocket(url); }catch(e){ next(); return; }
   sock.onopen=function(){
     opened=true; settled=true; clearTimeout(timer);
-    ws=sock;
-    dlog('open '+(secure?'wss:3001':'ws:3000'));
+    ws=sock; viaRelay=isRelay;
+    dlog('open '+label);
     sendRegister(false);
     setStatus(pairingType==='PIN'?'Waiting for TV to show the PIN…':'Waiting for TV…');
   };
@@ -402,7 +410,7 @@ function onWsClose(ev){
 function onFail(msg){
   var ip=$('ip').value.trim();
   setPill('Failed','');
-  setStatus(msg+' Tip: if your TV uses the secure port, open https://'+ip+':3001 in Safari once, accept the certificate warning, then tap Connect again. Also check: Settings → Network → LG Connect Apps is ON.', true);
+  setStatus(msg+' Tip: the page tries a local relay first — make sure relay.py is running in a-Shell (python3 relay.py). Also check: Settings → Network → LG Connect Apps is ON.', true);
 }
 
 function onMessage(ev){
@@ -448,10 +456,12 @@ function onPaired(){
   setPill('Connected','on');
   setStatus('');
   setupEl.classList.add('hidden'); remoteEl.classList.remove('hidden');
-  // open the button/input socket for D-pad keys
+  // open the button/input socket for D-pad keys (via relay too, same Origin issue)
   request('ssap://com.webos.service.networkinput/getPointerInputSocket').then(function(p){
     if(p && p.socketPath){
-      ptrWs=new WebSocket(p.socketPath);
+      var purl = viaRelay ? relayUrl(p.socketPath) : p.socketPath;
+      dlog('pointer via '+(viaRelay?'relay':'direct'));
+      ptrWs=new WebSocket(purl);
       ptrWs.onopen=function(){ ptrReady=true; };
       ptrWs.onclose=function(){ ptrReady=false; };
       ptrWs.onerror=function(){ ptrReady=false; };
