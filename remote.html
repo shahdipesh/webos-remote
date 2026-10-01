@@ -62,6 +62,8 @@
   #pad .padhint{color:var(--dim);font-size:13px;line-height:1.7;pointer-events:none;text-align:center;padding:0 24px;}
   #pad.active .padhint{opacity:0;}
   #pad.tap{border-color:var(--ok);}
+  .scrollpad{display:grid;grid-template-columns:repeat(3,64px);gap:8px;justify-content:center;}
+  .scrollpad .btn{aspect-ratio:1.35;border-radius:14px;font-size:18px;}
   .volch{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
   .volch .col{display:flex;flex-direction:column;gap:10px;}
   .volval{text-align:center;font-size:13px;color:var(--dim);font-weight:600;min-height:18px;}
@@ -134,6 +136,16 @@
     </div>
 
     <div class="card">
+      <h2>Scroll</h2>
+      <div class="scrollpad">
+        <div></div><button class="btn" data-sdx="0" data-sdy="-160">▲</button><div></div>
+        <button class="btn" data-sdx="-160" data-sdy="0">◀</button><div></div><button class="btn" data-sdx="160" data-sdy="0">▶</button>
+        <div></div><button class="btn" data-sdx="0" data-sdy="160">▼</button><div></div>
+      </div>
+      <p class="hint">Tap an arrow for a nudge, hold it to keep scrolling.</p>
+    </div>
+
+    <div class="card">
       <h2>Keyboard</h2>
       <div class="pinrow">
         <input id="kbInput" type="text" placeholder="Type for the TV…" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="send">
@@ -199,7 +211,7 @@
 <script>
 (function(){
 "use strict";
-var APP_VER='v18';
+var APP_VER='v19';
 // Cache the page for offline loads: iOS pauses a-Shell in the background,
 // which also stops its file server. The service worker serves the cached
 // page so it still opens; the relay is only needed as a fallback.
@@ -701,6 +713,31 @@ function press(name){
   pad.addEventListener('contextmenu', function(e){ e.preventDefault(); });
   $('padClick').addEventListener('click', doClick);
 })();
+
+// Scroll arrows: tap = one nudge, hold = keep scrolling.
+function scrollBy(dx,dy){
+  if(!ptrReady || !ptrWs || ptrWs.readyState!==1){ setStatus('Pointer not ready yet — wait a second and retry.', true); return; }
+  try{ ptrWs.send('type:scroll\ndx:'+dx+'\ndy:'+dy+'\n\n'); }
+  catch(e){ setStatus('Scroll failed.', true); }
+}
+var scrollBtns=document.querySelectorAll('[data-sdx]');
+for(var si=0; si<scrollBtns.length; si++){
+  (function(b){
+    var dx=parseInt(b.getAttribute('data-sdx'),10)||0;
+    var dy=parseInt(b.getAttribute('data-sdy'),10)||0;
+    var iv=null;
+    function stop(){ if(iv){ clearInterval(iv); iv=null; } }
+    b.addEventListener('pointerdown', function(e){
+      e.preventDefault();
+      stop(); scrollBy(dx,dy);
+      iv=setInterval(function(){ scrollBy(dx,dy); }, 140);
+    });
+    b.addEventListener('pointerup', stop);
+    b.addEventListener('pointercancel', stop);
+    b.addEventListener('pointerleave', stop);
+    b.addEventListener('contextmenu', function(e){ e.preventDefault(); });
+  })(scrollBtns[si]);
+}
 
 function cmd(uri, payload, label){
   setStatus(label?('Sending '+label+'…'):'');
