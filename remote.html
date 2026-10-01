@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>TV Remote</title>
+<style>
+  :root{
+    --bg:#101014; --card:#1a1a21; --btn:#26262f; --btn-active:#3a3a48;
+    --accent:#e11d48; --text:#f4f4f5; --dim:#9a9aa5; --ok:#22c55e; --warn:#f59e0b;
+  }
+  *{box-sizing:border-box; -webkit-tap-highlight-color:transparent;}
+  html,body{margin:0;padding:0;}
+  body{
+    background:var(--bg); color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text",system-ui,sans-serif;
+    min-height:100dvh; display:flex; flex-direction:column; align-items:center;
+    padding:calc(env(safe-area-inset-top,0px) + 12px) 16px calc(env(safe-area-inset-bottom,0px) + 16px);
+    touch-action:manipulation;
+  }
+  .wrap{width:100%;max-width:420px;display:flex;flex-direction:column;gap:14px;}
+  header{display:flex;align-items:center;justify-content:space-between;}
+  header h1{font-size:20px;margin:0;font-weight:700;}
+  .pill{font-size:12px;font-weight:600;padding:6px 12px;border-radius:999px;background:var(--card);color:var(--dim);white-space:nowrap;}
+  .pill.on{background:rgba(34,197,94,.15);color:var(--ok);}
+  .pill.busy{background:rgba(245,158,11,.15);color:var(--warn);}
+  .card{background:var(--card);border-radius:16px;padding:16px;}
+  .card h2{font-size:14px;margin:0 0 8px;color:var(--dim);font-weight:600;}
+  .card p{font-size:13px;color:var(--dim);margin:8px 0;line-height:1.5;}
+  .card p b{color:var(--text);}
+  input[type=text]{
+    width:100%;background:var(--btn);border:1px solid #34343f;color:var(--text);
+    font-size:17px;padding:12px 14px;border-radius:12px;outline:none;
+  }
+  input[type=text]:focus{border-color:var(--accent);}
+  .btn{
+    background:var(--btn);color:var(--text);border:none;border-radius:14px;
+    font-size:16px;font-weight:600;padding:14px 10px;cursor:pointer;
+    touch-action:manipulation;user-select:none;-webkit-user-select:none;
+    display:flex;align-items:center;justify-content:center;gap:6px;
+  }
+  .btn:active{background:var(--btn-active);transform:scale(.97);}
+  .btn:disabled{opacity:.35;}
+  .btn.primary{background:var(--accent);color:#fff;}
+  .btn.primary:active{background:#be123c;}
+  .btn.small{font-size:13px;padding:10px 8px;border-radius:10px;}
+  .row{display:flex;gap:10px;}
+  .row .btn{flex:1;}
+  .dpad{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;max-width:300px;margin:0 auto;}
+  .dpad .btn{aspect-ratio:1.35;border-radius:16px;font-size:20px;}
+  .dpad .ok{background:#34343f;font-size:15px;}
+  .sidebtns{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;}
+  .volch{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
+  .volch .col{display:flex;flex-direction:column;gap:10px;}
+  .volval{text-align:center;font-size:13px;color:var(--dim);font-weight:600;min-height:18px;}
+  .media{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;}
+  .media .btn{font-size:17px;padding:12px 4px;}
+  .apps{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;}
+  #status{font-size:13px;color:var(--dim);text-align:center;min-height:20px;line-height:1.4;}
+  #status.err{color:var(--accent);}
+  .hidden{display:none !important;}
+  .hint{font-size:12px;color:var(--dim);line-height:1.6;}
+  .hint code{background:var(--btn);padding:2px 6px;border-radius:6px;color:var(--text);font-size:12px;}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>📺 TV Remote</h1>
+    <div id="pill" class="pill">Disconnected</div>
+  </header>
+
+  <!-- SETUP -->
+  <div id="setup" class="card">
+    <h2>Connect to your TV</h2>
+    <p>Enter your TV's IP address. Find it on the TV at <b>Settings → Network → Wi-Fi Connection → Advanced → IP address</b>. Your phone must be on the same Wi-Fi.</p>
+    <div class="row">
+      <input type="text" id="ip" inputmode="decimal" placeholder="192.168.1.___" autocomplete="off">
+    </div>
+    <div style="height:10px"></div>
+    <div class="row">
+      <button class="btn primary" id="connectBtn">Connect</button>
+    </div>
+    <p class="hint" id="setupHint">First time: the TV will show a pairing prompt — accept it with your normal remote.</p>
+  </div>
+
+  <!-- REMOTE -->
+  <div id="remote" class="hidden" style="display:flex;flex-direction:column;gap:14px;">
+    <div class="card">
+      <div class="row">
+        <button class="btn" id="powerBtn" style="color:#fda4af;">⏻ Power off</button>
+        <button class="btn" id="muteBtn">🔇 Mute</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Navigate</h2>
+      <div class="dpad">
+        <div></div><button class="btn" data-key="UP">▲</button><div></div>
+        <button class="btn" data-key="LEFT">◀</button><button class="btn ok" data-key="ENTER">OK</button><button class="btn" data-key="RIGHT">▶</button>
+        <div></div><button class="btn" data-key="DOWN">▼</button><div></div>
+      </div>
+      <div style="height:10px"></div>
+      <div class="sidebtns">
+        <button class="btn small" data-key="BACK">← Back</button>
+        <button class="btn small" data-key="HOME">⌂ Home</button>
+        <button class="btn small" data-key="EXIT">Exit</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="volch">
+        <div class="col">
+          <button class="btn" id="volUp">🔊 Vol +</button>
+          <div class="volval" id="volVal">–</div>
+          <button class="btn" id="volDown">🔉 Vol −</button>
+        </div>
+        <div class="col">
+          <button class="btn" id="chUp">CH +</button>
+          <div class="volval">&nbsp;</div>
+          <button class="btn" id="chDown">CH −</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Playback</h2>
+      <div class="media">
+        <button class="btn" id="rw" title="Rewind">⏮</button>
+        <button class="btn" id="play" title="Play">▶</button>
+        <button class="btn" id="pause" title="Pause">⏸</button>
+        <button class="btn" id="stop" title="Stop">⏹</button>
+        <button class="btn" id="ff" title="Fast forward">⏭</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Apps</h2>
+      <div class="apps">
+        <button class="btn small" data-app="netflix">Netflix</button>
+        <button class="btn small" data-app="youtube">YouTube</button>
+        <button class="btn small" data-app="amazon">Prime</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="row">
+        <button class="btn small" id="reconnectBtn">↻ Reconnect</button>
+        <button class="btn small" id="forgetBtn">Forget TV</button>
+      </div>
+      <p class="hint">Tip: add this page to your home screen for an app-like remote. Note: the TV must be <b>on</b> for the remote to connect — power-on isn't possible over the network.</p>
+    </div>
+  </div>
+
+  <div id="status"></div>
+</div>
+
+<script>
+(function(){
+"use strict";
+var LS_IP='webos_tv_ip', LS_KEY='webos_client_key';
+var ws=null, ptrWs=null, ptrReady=false, seq=0, isConnected=false;
+var pending={};
+
+var $=function(id){return document.getElementById(id);};
+var pill=$('pill'), statusEl=$('status'), setupEl=$('setup'), remoteEl=$('remote');
+
+function setPill(txt, cls){ pill.textContent=txt; pill.className='pill'+(cls?' '+cls:''); }
+function setStatus(txt, isErr){ statusEl.textContent=txt||''; statusEl.className=isErr?'err':''; }
+
+var MANIFEST={
+  "forcePairing": false,
+  "pairingType": "PROMPT",
+  "manifest": {
+    "manifestVersion": 1,
+    "appVersion": "1.1",
+    "signed": {
+      "created": "20140509",
+      "appId": "com.lge.test",
+      "vendorId": "com.lge",
+      "localizedAppNames": {"": "LG Remote App", "ko-KR": "리모컨 앱", "zxx-XX": "ЛГ Rэмotэ AПП"},
+      "localizedVendorNames": {"": "LG Electronics"},
+      "permissions": ["TEST_SECURE","CONTROL_INPUT_TEXT","CONTROL_MOUSE_AND_KEYBOARD","READ_INSTALLED_APPS","READ_LGE_SDX","READ_NOTIFICATIONS","SEARCH","WRITE_SETTINGS","WRITE_NOTIFICATION_ALERT","CONTROL_POWER","READ_CURRENT_CHANNEL","READ_RUNNING_APPS","READ_UPDATE_INFO","UPDATE_FROM_REMOTE_APP","READ_LGE_TV_INPUT_EVENTS","READ_TV_CURRENT_TIME"],
+      "serial": "2f930e2d2cfe083771f68e4fe7bb07"
+    },
+    "permissions": ["LAUNCH","LAUNCH_WEBAPP","APP_TO_APP","CLOSE","TEST_OPEN","TEST_PROTECTED","CONTROL_AUDIO","CONTROL_DISPLAY","CONTROL_INPUT_JOYSTICK","CONTROL_INPUT_MEDIA_RECORDING","CONTROL_INPUT_MEDIA_PLAYBACK","CONTROL_INPUT_TV","CONTROL_POWER","READ_APP_STATUS","READ_CURRENT_CHANNEL","READ_INPUT_DEVICE_LIST","READ_NETWORK_STATE","READ_RUNNING_APPS","READ_TV_CHANNEL_LIST","WRITE_NOTIFICATION_TOAST","READ_POWER_STATE","READ_COUNTRY_INFO","READ_SETTINGS","CONTROL_TV_SCREEN","CONTROL_TV_STANBY","CONTROL_FAVORITE_GROUP","CONTROL_USER_INFO","CHECK_BLUETOOTH_DEVICE","CONTROL_BLUETOOTH","CONTROL_TIMER_INFO","STB_INTERNAL_CONNECTION","CONTROL_RECORDING","READ_RECORDING_STATE","WRITE_RECORDING_LIST","READ_RECORDING_LIST","READ_RECORDING_SCHEDULE","WRITE_RECORDING_SCHEDULE","READ_STORAGE_DEVICE_LIST","READ_TV_PROGRAM_INFO","CONTROL_BOX_CHANNEL","READ_TV_ACR_AUTH_TOKEN","READ_TV_CONTENT_STATE","READ_TV_CURRENT_TIME","ADD_LAUNCHER_CHANNEL","SET_CHANNEL_SKIP","RELEASE_CHANNEL_SKIP","CONTROL_CHANNEL_BLOCK","DELETE_SELECT_CHANNEL","CONTROL_CHANNEL_GROUP","SCAN_TV_CHANNELS","CONTROL_TV_POWER","CONTROL_WOL"]
+  }
+};
+
+function cid(){ seq++; return 'app_'+seq+'_'+Date.now().toString(16); }
+
+function connect(){
+  var ip=$('ip').value.trim();
+  if(!ip){ setStatus('Enter the TV\'s IP address first.', true); return; }
+  try{ localStorage.setItem(LS_IP, ip); }catch(e){}
+  disconnect(false);
+  setPill('Connecting…','busy');
+  setStatus('Connecting to '+ip+'…');
+  var url='ws://'+ip+':3000';
+  try{ ws=new WebSocket(url); }catch(e){ onFail('Could not open connection.'); return; }
+  var opened=false;
+  ws.onopen=function(){
+    opened=true;
+    var payload=JSON.parse(JSON.stringify(MANIFEST));
+    var key=null;
+    try{ key=localStorage.getItem(LS_KEY); }catch(e){}
+    if(key){ payload['client-key']=key; }
+    ws.send(JSON.stringify({id:cid(), type:'register', payload:payload}));
+    setStatus('Waiting for TV…');
+  };
+  ws.onmessage=onMessage;
+  ws.onerror=function(){ if(!opened) onFail('Connection failed. Is the TV on, on the same Wi-Fi, and is the IP correct?'); };
+  ws.onclose=function(){
+    isConnected=false; ptrReady=false;
+    if(ptrWs){ try{ptrWs.close();}catch(e){} ptrWs=null; }
+    for(var k in pending){ try{pending[k].reject(new Error('disconnected'));}catch(e){} }
+    pending={};
+    setPill('Disconnected','');
+    remoteEl.classList.add('hidden'); setupEl.classList.remove('hidden');
+    if(opened) setStatus('Disconnected.', false);
+  };
+}
+
+function onFail(msg){
+  setPill('Failed',''); setStatus(msg+' Also check: Settings → Network → LG Connect Apps is ON.', true);
+}
+
+function onMessage(ev){
+  var m; try{ m=JSON.parse(ev.data); }catch(e){ return; }
+  if(m.type==='registered'){
+    if(m.payload && m.payload['client-key']){
+      try{ localStorage.setItem(LS_KEY, m.payload['client-key']); }catch(e){}
+      onPaired();
+    }else{
+      setPill('Pairing…','busy');
+      setStatus('Check your TV screen and accept the connection prompt.');
+    }
+    return;
+  }
+  if(m.id && pending[m.id]){
+    var cb=pending[m.id]; delete pending[m.id];
+    cb.resolve(m.payload||{});
+  }
+}
+
+function request(uri, payload){
+  return new Promise(function(resolve,reject){
+    if(!ws || ws.readyState!==1){ reject(new Error('not connected')); return; }
+    var id=cid();
+    pending[id]={resolve:resolve, reject:reject};
+    setTimeout(function(){ if(pending[id]){ delete pending[id]; reject(new Error('timeout')); } }, 9000);
+    ws.send(JSON.stringify({id:id, type:'request', uri:uri, payload:payload||{}}));
+  });
+}
+
+function onPaired(){
+  isConnected=true;
+  setPill('Connected','on');
+  setStatus('');
+  setupEl.classList.add('hidden'); remoteEl.classList.remove('hidden');
+  // open the button/input socket for D-pad keys
+  request('ssap://com.webos.service.networkinput/getPointerInputSocket').then(function(p){
+    if(p && p.socketPath){
+      ptrWs=new WebSocket(p.socketPath);
+      ptrWs.onopen=function(){ ptrReady=true; };
+      ptrWs.onclose=function(){ ptrReady=false; };
+      ptrWs.onerror=function(){ ptrReady=false; };
+    }
+  }).catch(function(){ /* D-pad unavailable, other buttons still work */ });
+  refreshVolume();
+}
+
+function press(name){
+  if(!ptrReady || !ptrWs || ptrWs.readyState!==1){ setStatus('D-pad not ready yet — wait a second and retry.', true); return; }
+  try{ ptrWs.send('type:button\nname:'+name+'\n\n'); setStatus(''); }
+  catch(e){ setStatus('D-pad send failed.', true); }
+}
+
+function cmd(uri, payload, label){
+  setStatus(label?('Sending '+label+'…'):'');
+  request(uri, payload).then(function(){ setStatus(''); if(/audio/.test(uri)) refreshVolume(); })
+    .catch(function(e){ setStatus('Failed: '+e.message, true); });
+}
+
+function refreshVolume(){
+  request('ssap://audio/getVolume').then(function(p){
+    if(p && typeof p.volume!=='undefined'){
+      $('volVal').textContent='Vol '+p.volume+(p.muted?' (muted)':'');
+    }
+  }).catch(function(){});
+}
+
+function disconnect(silent){
+  if(ws){ try{ws.close();}catch(e){} ws=null; }
+  if(ptrWs){ try{ptrWs.close();}catch(e){} ptrWs=null; }
+  ptrReady=false; isConnected=false;
+  if(!silent){ setPill('Disconnected',''); }
+}
+
+$('connectBtn').addEventListener('click', connect);
+$('ip').addEventListener('keydown', function(e){ if(e.key==='Enter') connect(); });
+$('reconnectBtn').addEventListener('click', function(){ connect(); });
+$('forgetBtn').addEventListener('click', function(){
+  try{ localStorage.removeItem(LS_IP); localStorage.removeItem(LS_KEY); }catch(e){}
+  $('ip').value=''; disconnect();
+  remoteEl.classList.add('hidden'); setupEl.classList.remove('hidden');
+  setStatus('Forgot TV. Enter the IP to pair again.');
+});
+
+var keyBtns=document.querySelectorAll('[data-key]');
+for(var i=0;i<keyBtns.length;i++){
+  (function(b){ b.addEventListener('click', function(){ press(b.getAttribute('data-key')); }); })(keyBtns[i]);
+}
+var appBtns=document.querySelectorAll('[data-app]');
+for(var j=0;j<appBtns.length;j++){
+  (function(b){ b.addEventListener('click', function(){ cmd('ssap://system.launcher/launch',{id:b.getAttribute('data-app')}, b.textContent); }); })(appBtns[j]);
+}
+
+$('volUp').addEventListener('click', function(){ cmd('ssap://audio/volumeUp',{},'volume up'); });
+$('volDown').addEventListener('click', function(){ cmd('ssap://audio/volumeDown',{},'volume down'); });
+$('muteBtn').addEventListener('click', function(){
+  request('ssap://audio/getVolume').then(function(p){
+    return request('ssap://audio/setMute',{mute:!(p&&p.muted)});
+  }).then(function(){ setStatus(''); refreshVolume(); })
+  .catch(function(e){ setStatus('Failed: '+e.message, true); });
+});
+$('chUp').addEventListener('click', function(){ cmd('ssap://tv/channelUp',{},'channel up'); });
+$('chDown').addEventListener('click', function(){ cmd('ssap://tv/channelDown',{},'channel down'); });
+$('powerBtn').addEventListener('click', function(){
+  if(confirm('Turn the TV off?')) cmd('ssap://system/turnOff',{},'power off');
+});
+$('play').addEventListener('click', function(){ cmd('ssap://media.controls/play',{},'play'); });
+$('pause').addEventListener('click', function(){ cmd('ssap://media.controls/pause',{},'pause'); });
+$('stop').addEventListener('click', function(){ cmd('ssap://media.controls/stop',{},'stop'); });
+$('rw').addEventListener('click', function(){ cmd('ssap://media.controls/rewind',{},'rewind'); });
+$('ff').addEventListener('click', function(){ cmd('ssap://media.controls/fastForward',{},'fast forward'); });
+
+// prefill saved IP
+try{
+  var saved=localStorage.getItem(LS_IP);
+  if(saved) $('ip').value=saved;
+}catch(e){}
+})();
+</script>
+</body>
+</html>
