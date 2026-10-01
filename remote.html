@@ -100,7 +100,7 @@
         <button class="btn primary" id="pinSendBtn">Send</button>
       </div>
     </div>
-    <p class="hint" id="setupHint">First time: the TV should show a pairing prompt — accept it with your normal remote. If that fails, use PIN pairing.<br><br>Run <code>python3 relay.py</code> in a-Shell first — it serves this page and fixes TVs that instantly reject browser connections.</p>
+    <p class="hint" id="setupHint">First time: the TV should show a pairing prompt — accept it with your normal remote. If that fails, use PIN pairing.<br><br>Run <code>python3 relay.py</code> in a-Shell first — it serves this page and fixes TVs that instantly reject browser connections. Note: iOS pauses a-Shell in the background, which pauses the relay too — if buttons stop responding, swipe to a-Shell and back to wake it.</p>
   </div>
 
   <!-- REMOTE -->
@@ -167,7 +167,7 @@
         <button class="btn small" id="reconnectBtn">↻ Reconnect</button>
         <button class="btn small" id="forgetBtn">Forget TV</button>
       </div>
-      <p class="hint">Tip: add this page to your home screen for an app-like remote. Note: the TV must be <b>on</b> for the remote to connect — power-on isn't possible over the network.</p>
+      <p class="hint">Tip: add this page to your home screen for an app-like remote. The TV must be <b>on</b> — power-on isn't possible over the network. If buttons stop responding, iOS has paused a-Shell in the background: swipe to a-Shell and back to wake the relay.</p>
     </div>
   </div>
 
@@ -178,6 +178,12 @@
 <script>
 (function(){
 "use strict";
+// Cache the page for offline loads: iOS pauses a-Shell in the background,
+// which also stops its file server. The service worker serves the cached
+// page so it still opens; the relay is only needed for actual commands.
+if('serviceWorker' in navigator && location.protocol==='http:'){
+  navigator.serviceWorker.register('sw.js').catch(function(){});
+}
 var LS_IP='webos_tv_ip', LS_KEY='webos_client_key';
 var ws=null, ptrWs=null, ptrReady=false, seq=0, isConnected=false, viaRelay=false;
 function relayUrl(target){ return 'ws://127.0.0.1:8765/?target='+encodeURIComponent(target); }
@@ -408,6 +414,7 @@ function onWsClose(ev){
   var code=ev&&ev.code;
   ws=null;
   isConnected=false; ptrReady=false;
+  stopHeartbeat();
   if(ptrWs){ try{ptrWs.close();}catch(e){} ptrWs=null; }
   for(var k in pending){ try{pending[k].reject(new Error('disconnected'));}catch(e){} }
   pending={};
@@ -482,6 +489,7 @@ function onPaired(){
   setPill('Connected','on');
   setStatus('');
   setupEl.classList.add('hidden'); remoteEl.classList.remove('hidden');
+  startHeartbeat();
   // open the button/input socket for D-pad keys (via relay too, same Origin issue)
   request('ssap://com.webos.service.networkinput/getPointerInputSocket').then(function(p){
     if(p && p.socketPath){
@@ -495,6 +503,38 @@ function onPaired(){
   }).catch(function(){ /* D-pad unavailable, other buttons still work */ });
   refreshVolume();
 }
+
+// Heartbeat: iOS pauses a-Shell in the background, which stalls (not kills)
+// the relay. A quiet volume poll every 10s detects the stall so the page can
+// say what's happening instead of silently swallowing taps. Taps made while
+// paused queue in TCP buffers and flush through on wake.
+var hbTimer=null, asleep=false;
+function setAsleep(s){
+  if(s===asleep) return;
+  asleep=s;
+  if(s){
+    setPill('Relay asleep','busy');
+    setStatus('iOS paused a-Shell in the background — swipe to a-Shell and back to wake the relay. Button taps will go through once it wakes.');
+    dlog('relay asleep (heartbeat timeout)');
+  }else{
+    setPill('Connected','on');
+    setStatus('');
+    dlog('relay awake');
+  }
+}
+function heartbeat(){
+  if(!isConnected || !ws || ws.readyState!==1) return;
+  var id=cid();
+  var to=setTimeout(function(){ delete pending[id]; setAsleep(true); }, 4000);
+  pending[id]={resolve:function(p){
+    clearTimeout(to); setAsleep(false);
+    if(p && typeof p.volume!=='undefined') $('volVal').textContent='Vol '+p.volume+(p.muted?' (muted)':'');
+  }, reject:function(e){ clearTimeout(to); setAsleep(true); }};
+  try{ ws.send(JSON.stringify({id:id, type:'request', uri:'ssap://audio/getVolume', payload:{}})); }
+  catch(e){ clearTimeout(to); delete pending[id]; setAsleep(true); }
+}
+function startHeartbeat(){ stopHeartbeat(); hbTimer=setInterval(heartbeat, 10000); }
+function stopHeartbeat(){ if(hbTimer){ clearInterval(hbTimer); hbTimer=null; } asleep=false; }
 
 function press(name){
   if(!ptrReady || !ptrWs || ptrWs.readyState!==1){ setStatus('D-pad not ready yet — wait a second and retry.', true); return; }
@@ -517,6 +557,7 @@ function refreshVolume(){
 }
 
 function disconnect(silent){
+  stopHeartbeat();
   if(ws){ try{ws.close();}catch(e){} ws=null; }
   if(ptrWs){ try{ptrWs.close();}catch(e){} ptrWs=null; }
   ptrReady=false; isConnected=false;
