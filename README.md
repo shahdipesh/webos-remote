@@ -35,22 +35,32 @@ Implements the webOS pairing handshake (`type: register` with the standard test 
 - `ssap://media.controls/play|pause|stop|rewind|fastForward`
 - D-pad keys via `ssap://com.webos.service.networkinput/getPointerInputSocket` (`type:button` messages)
 
-## relay.py — fixes instant disconnect (code 1008)
+## How the page reaches the TV
 
-Some TV firmware instantly closes any WebSocket carrying a browser `Origin`
-header, while native remote apps pair fine. `relay.py` works around it, and it
-also serves the page itself — one command does everything:
+Some TV firmware instantly closes (code 1008) any WebSocket carrying a browser
+`Origin` header, while native remote apps pair fine. `relay.py --probe` showed
+this TV also accepts `Origin: null` — so the page opens its TV connections
+from inside a hidden sandboxed iframe (`socket.html`), whose opaque origin
+makes the handshake carry `Origin: null`. No relay, no extra software.
+
+Connection order: direct via iframe → local relay → plain direct.
+
+## relay.py — fallback + page server
+
+`relay.py` re-opens the page's connection toward the TV with no `Origin`
+header (like a native app), and it also serves the page itself:
 
 1. In a-Shell: `python3 relay.py`
 2. In Safari: `http://127.0.0.1:8000/remote.html` → Connect.
 
-The page talks to the relay at `ws://127.0.0.1:8765/?target=...`, which
-re-opens the connection to the TV with no `Origin` header — just like a native
-app. Stdlib only, no packages to install. If the relay isn't running, the page
-falls back to a direct connection automatically.
+The page talks to the relay at `ws://127.0.0.1:8765/?target=...`. Stdlib only,
+no packages to install. It also has a `--probe` mode
+(`python3 relay.py --probe [tv-ip]`) that tests which handshake headers the TV
+accepts — that experiment is what made the direct iframe connection possible.
 
 **iOS note:** iOS pauses a-Shell when it's in the background, which pauses the
 relay too (connections stall, they don't die — taps queue and flush on wake).
-The page now detects this with a heartbeat and shows "Relay asleep — swipe to
+The page detects this with a heartbeat and shows "Relay asleep — swipe to
 a-Shell and back to wake it". A service worker also caches the page, so it
-still opens when a-Shell is asleep; only actual commands need the relay awake.
+still opens when a-Shell is asleep. The direct iframe route needs no relay at
+all, so none of this applies when the direct connection works.
