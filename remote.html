@@ -45,6 +45,11 @@
   .btn:active{background:var(--btn-active);transform:scale(.97);}
   .btn:disabled{opacity:.35;}
   .btn.primary{background:var(--accent);color:#fff;}
+  .btn.ghost{background:transparent;border:1px solid var(--line);color:var(--ink);}
+  #pinEntry{margin-top:10px;}
+  .pinrow{display:flex;gap:8px;margin-top:6px;}
+  .pinrow input{flex:1;}
+  .pinrow .btn{width:auto;padding:12px 18px;flex:none;}
   .btn.primary:active{background:#be123c;}
   .btn.small{font-size:13px;padding:10px 8px;border-radius:10px;}
   .row{display:flex;gap:10px;}
@@ -85,7 +90,17 @@
     <div class="row">
       <button class="btn primary" id="connectBtn">Connect</button>
     </div>
-    <p class="hint" id="setupHint">First time: the TV will show a pairing prompt — accept it with your normal remote.</p>
+    <div class="row">
+      <button class="btn ghost" id="pinBtn">Pair with PIN instead</button>
+    </div>
+    <div id="pinEntry" class="hidden">
+      <label for="pinInput">PIN shown on your TV</label>
+      <div class="pinrow">
+        <input type="text" id="pinInput" inputmode="numeric" pattern="[0-9]*" maxlength="8" placeholder="8-digit PIN" autocomplete="off">
+        <button class="btn primary" id="pinSendBtn">Send</button>
+      </div>
+    </div>
+    <p class="hint" id="setupHint">First time: the TV should show a pairing prompt — accept it with your normal remote. If that fails, use PIN pairing.</p>
   </div>
 
   <!-- REMOTE -->
@@ -166,6 +181,7 @@
 var LS_IP='webos_tv_ip', LS_KEY='webos_client_key';
 var ws=null, ptrWs=null, ptrReady=false, seq=0, isConnected=false;
 var pending={};
+var pairingType='PROMPT', lastType='PROMPT';
 
 var $=function(id){return document.getElementById(id);};
 var pill=$('pill'), statusEl=$('status'), setupEl=$('setup'), remoteEl=$('remote');
@@ -291,11 +307,14 @@ function manifestFor(unsigned){
 }
 function sendRegister(unsigned){
   var payload=manifestFor(unsigned);
+  payload.pairingType=pairingType;
   var key=null;
   try{ key=localStorage.getItem(LS_KEY); }catch(e){}
   if(key){ payload['client-key']=key; }
   var rid=cid();
-  pending[rid]={resolve:function(){}, reject:function(e){
+  pending[rid]={resolve:function(pl){
+    if(pl && !pl['client-key'] && (pl.pairingType==='PIN'||pl.pairingType==='pin')){ showPinEntry(); }
+  }, reject:function(e){
     if(!unsigned && /403.*blacklist/i.test(e.message||'')){
       dlog('signed cert blacklisted by TV, retrying unsigned');
       setStatus('Retrying with unsigned pairing…');
@@ -306,10 +325,34 @@ function sendRegister(unsigned){
   }};
   try{ ws.send(JSON.stringify({id:rid, type:'register', payload:payload})); }
   catch(e){ setStatus('Send failed.', true); return; }
-  dlog('sent register ('+(unsigned?'unsigned':'signed+signatures')+')');
+  dlog('sent register ('+(unsigned?'unsigned':'signed+signatures')+', '+pairingType+')');
+}
+function showPinEntry(){
+  $('pinEntry').classList.remove('hidden');
+  setPill('Pairing…','busy');
+  setStatus('Enter the PIN shown on your TV:');
+  dlog('TV asked for PIN');
+}
+function sendPin(){
+  var pin=$('pinInput').value.trim();
+  if(!/^\d{4,8}$/.test(pin)){ setStatus('Type the PIN shown on your TV screen.', true); return; }
+  if(!ws){ setStatus('Not connected. Tap "Pair with PIN" first.', true); return; }
+  var rid=cid();
+  pending[rid]={resolve:function(pl){
+    var k=pl&&pl['client-key'];
+    if(k){ try{localStorage.setItem(LS_KEY,k);}catch(e){} onPaired(); }
+    else{ setStatus('TV did not return a key — check the PIN and try again.', true); }
+  }, reject:function(e){ setStatus('PIN rejected: '+e.message, true); }};
+  try{ ws.send(JSON.stringify({id:rid, type:'request', uri:'ssap://pairing/setPin', payload:{pin:pin}})); }
+  catch(e){ setStatus('Send failed.', true); return; }
+  setStatus('Verifying PIN…');
+  dlog('sent PIN');
 }
 
-function connect(){
+function connect(type){
+  pairingType=(type==='PIN')?'PIN':'PROMPT';
+  lastType=pairingType;
+  $('pinEntry').classList.add('hidden');
   var ip=$('ip').value.trim();
   if(!ip){ setStatus('Enter the TV\'s IP address first.', true); return; }
   try{ localStorage.setItem(LS_IP, ip); }catch(e){}
@@ -331,14 +374,9 @@ function tryUrl(ip, urls, i){
   sock.onopen=function(){
     opened=true; settled=true; clearTimeout(timer);
     ws=sock;
-    var payload=JSON.parse(JSON.stringify(MANIFEST));
-    var key=null;
-    try{ key=localStorage.getItem(LS_KEY); }catch(e){}
-    if(key){ payload['client-key']=key; }
-    var rid=cid();
-    pending[rid]={resolve:function(){}, reject:function(e){ setStatus('Pairing rejected by TV: '+e.message, true); }};
+    dlog('open '+(secure?'wss:3001':'ws:3000'));
     sendRegister(false);
-    setStatus('Waiting for TV…');
+    setStatus(pairingType==='PIN'?'Waiting for TV to show the PIN…':'Waiting for TV…');
   };
   sock.onmessage=onMessage;
   sock.onerror=function(){ if(!opened) next(); };
@@ -381,6 +419,8 @@ function onMessage(ev){
     if(m.payload && m.payload['client-key']){
       try{ localStorage.setItem(LS_KEY, m.payload['client-key']); }catch(e){}
       onPaired();
+    }else if(m.payload && (m.payload.pairingType==='PIN'||m.payload.pairingType==='pin')){
+      showPinEntry();
     }else{
       setPill('Pairing…','busy');
       setStatus('Check your TV screen and accept the connection prompt.');
@@ -447,9 +487,11 @@ function disconnect(silent){
   if(!silent){ setPill('Disconnected',''); }
 }
 
-$('connectBtn').addEventListener('click', connect);
+$('connectBtn').addEventListener('click', function(){ connect('PROMPT'); });
+$('pinBtn').addEventListener('click', function(){ connect('PIN'); });
+$('pinSendBtn').addEventListener('click', sendPin);
 $('ip').addEventListener('keydown', function(e){ if(e.key==='Enter') connect(); });
-$('reconnectBtn').addEventListener('click', function(){ connect(); });
+$('reconnectBtn').addEventListener('click', function(){ connect(lastType); });
 $('forgetBtn').addEventListener('click', function(){
   try{ localStorage.removeItem(LS_IP); localStorage.removeItem(LS_KEY); }catch(e){}
   $('ip').value=''; disconnect();
