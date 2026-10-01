@@ -309,6 +309,7 @@ function manifestFor(unsigned){
 function sendRegister(unsigned){
   var payload=manifestFor(unsigned);
   payload.pairingType=pairingType;
+  payload.forcePairing=false;
   var key=null;
   try{ key=localStorage.getItem(LS_KEY); }catch(e){}
   if(key){ payload['client-key']=key; }
@@ -334,25 +335,33 @@ function showPinEntry(){
   setStatus('Enter the PIN shown on your TV:');
   dlog('TV asked for PIN');
 }
+var pinSentAt=0, pinResolved=false, throttled=false;
 function sendPin(){
   var pin=$('pinInput').value.trim();
   if(!/^\d{4,8}$/.test(pin)){ setStatus('Type the PIN shown on your TV screen.', true); return; }
   if(!ws){ setStatus('Not connected. Tap "Pair with PIN" first.', true); return; }
   var rid=cid();
+  pinResolved=false; pinSentAt=Date.now();
   pending[rid]={resolve:function(pl){
+    pinResolved=true;
     var k=pl&&pl['client-key'];
     if(k){ try{localStorage.setItem(LS_KEY,k);}catch(e){} onPaired(); }
     else{ setStatus('TV did not return a key — check the PIN and try again.', true); }
-  }, reject:function(e){ setStatus('PIN rejected: '+e.message, true); }};
+  }, reject:function(e){ pinResolved=true; setStatus('PIN rejected: '+e.message, true); }};
   try{ ws.send(JSON.stringify({id:rid, type:'request', uri:'ssap://pairing/setPin', payload:{pin:pin}})); }
   catch(e){ setStatus('Send failed.', true); return; }
   setStatus('Verifying PIN…');
   dlog('sent PIN');
 }
 
+function setBusy(b){ $('connectBtn').disabled=b; $('pinBtn').disabled=b; }
+
 function connect(type){
+  if($('connectBtn').disabled) return; // ignore double-taps: one pairing flow at a time
   pairingType=(type==='PIN')?'PIN':'PROMPT';
   lastType=pairingType;
+  throttled=false; pinSentAt=0; pinResolved=false;
+  setBusy(true);
   $('pinEntry').classList.add('hidden');
   var ip=$('ip').value.trim();
   if(!ip){ setStatus('Enter the TV\'s IP address first.', true); return; }
@@ -376,7 +385,7 @@ function tryUrl(ip, urls, i){
   setStatus('Connecting to '+ip+'… ('+label+')');
   dlog('try '+label);
   var sock, opened=false, settled=false, timer=null;
-  function next(){ if(!settled){ settled=true; if(timer) clearTimeout(timer); try{ sock.close(); }catch(e){} tryUrl(ip, urls, i+1); } }
+  function next(){ if(!settled){ settled=true; if(timer) clearTimeout(timer); try{ sock.close(); }catch(e){} if(throttled){ setBusy(false); return; } tryUrl(ip, urls, i+1); } }
   timer=setTimeout(next, 7000);
   try{ sock=new WebSocket(url); }catch(e){ next(); return; }
   sock.onopen=function(){
@@ -404,10 +413,18 @@ function onWsClose(ev){
   pending={};
   setPill('Disconnected','');
   remoteEl.classList.add('hidden'); setupEl.classList.remove('hidden');
+  setBusy(false);
+  if(throttled) return; // throttling message already shown
+  if(pinSentAt && !pinResolved && Date.now()-pinSentAt<10000){
+    pinSentAt=0;
+    setStatus('Connection dropped right after sending the PIN, with no reply from the TV. Likely: the TV is throttling pairing (wait 10 min or restart the TV), or the a-Shell relay froze (check its window for a "[relay] closed" line).', true);
+    return;
+  }
   setStatus(code&&code!==1000?('Disconnected (code '+code+').'):('Disconnected.'), false);
 }
 
 function onFail(msg){
+  setBusy(false);
   var ip=$('ip').value.trim();
   setPill('Failed','');
   setStatus(msg+' Tip: the page tries a local relay first — make sure relay.py is running in a-Shell (python3 relay.py). Also check: Settings → Network → LG Connect Apps is ON.', true);
@@ -418,6 +435,14 @@ function onMessage(ev){
   dlog('recv '+(m.type||'?')+(m.error?(' err='+m.error):''));
   if(m.type==='error'){
     var emsg=m.error||(m.payload&&(m.payload.errorText||m.payload.errorCode))||'unknown error';
+    var full=String(m.error||'')+' '+String((m.payload&&(m.payload.errorText||m.payload.errorCode))||'');
+    if(/too many pairing/i.test(full)){
+      throttled=true;
+      setPill('Throttled','');
+      setStatus('TV says: too many pairing requests. Wait 10 minutes — or restart the TV — then tap once and try again.', true);
+      try{ ws.close(); }catch(e){}
+      return;
+    }
     if(m.id && pending[m.id]){ var cbe=pending[m.id]; delete pending[m.id]; try{cbe.reject(new Error(emsg));}catch(e){} }
     else setStatus('TV error: '+emsg, true);
     return;
@@ -453,6 +478,7 @@ function request(uri, payload){
 
 function onPaired(){
   isConnected=true;
+  setBusy(false);
   setPill('Connected','on');
   setStatus('');
   setupEl.classList.add('hidden'); remoteEl.classList.remove('hidden');
