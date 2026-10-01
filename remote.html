@@ -211,7 +211,7 @@
 <script>
 (function(){
 "use strict";
-var APP_VER='v19';
+var APP_VER='v20';
 // Cache the page for offline loads: iOS pauses a-Shell in the background,
 // which also stops its file server. The service worker serves the cached
 // page so it still opens; the relay is only needed as a fallback.
@@ -589,17 +589,7 @@ function onPaired(){
   setStatus('');
   setupEl.classList.add('hidden'); remoteEl.classList.remove('hidden');
   startHeartbeat();
-  // open the button/input socket for D-pad keys (same null-origin route when direct)
-  request('ssap://com.webos.service.networkinput/getPointerInputSocket').then(function(p){
-    if(p && p.socketPath){
-      var purl = viaRelay ? relayUrl(p.socketPath) : p.socketPath;
-      dlog('pointer via '+(viaRelay?'relay':'direct (null origin)'));
-      ptrWs = viaRelay ? new WebSocket(purl) : new Sock(purl);
-      ptrWs.onopen=function(){ ptrReady=true; };
-      ptrWs.onclose=function(){ ptrReady=false; };
-      ptrWs.onerror=function(){ ptrReady=false; };
-    }
-  }).catch(function(){ /* D-pad unavailable, other buttons still work */ });
+  openPtrSocket(); // touchpad socket (same null-origin route when direct)
   refreshVolume();
 }
 
@@ -635,10 +625,40 @@ function heartbeat(){
 function startHeartbeat(){ stopHeartbeat(); hbTimer=setInterval(heartbeat, 10000); }
 function stopHeartbeat(){ if(hbTimer){ clearInterval(hbTimer); hbTimer=null; } asleep=false; }
 
+// Named keys (Back/Home/Exit/OK) go over the main SSAP socket, not the
+// pointer socket: some firmware silently ignores `type:button` there, while
+// ssap://com.webos.service.networkinput/sendInputButton answers for real.
 function press(name){
-  if(!ptrReady || !ptrWs || ptrWs.readyState!==1){ setStatus('Pointer not ready yet — wait a second and retry.', true); return; }
-  try{ ptrWs.send('type:button\nname:'+name+'\n\n'); setStatus(''); }
-  catch(e){ setStatus('Pointer send failed.', true); }
+  cmd('ssap://com.webos.service.networkinput/sendInputButton', {buttonName:name}, name);
+}
+
+// Pointer-socket lifecycle. The TV can drop the pointer socket while idle;
+// re-acquire it lazily so the touchpad keeps working without a reconnect.
+var ptrOpening=false;
+function openPtrSocket(cb){
+  cb=cb||function(){};
+  if(ptrWs){ try{ptrWs.close();}catch(e){} ptrWs=null; }
+  ptrReady=false; ptrOpening=true;
+  request('ssap://com.webos.service.networkinput/getPointerInputSocket').then(function(p){
+    ptrOpening=false;
+    if(p && p.socketPath){
+      var purl = viaRelay ? relayUrl(p.socketPath) : p.socketPath;
+      dlog('pointer via '+(viaRelay?'relay':'direct (null origin)'));
+      var s = viaRelay ? new WebSocket(purl) : new Sock(purl);
+      ptrWs=s;
+      var done=false;
+      s.onopen=function(){ if(!done){ done=true; ptrReady=true; dlog('pointer socket open'); cb(true); } };
+      s.onclose=function(){ ptrReady=false; if(!done){ done=true; cb(false); } };
+      s.onerror=function(){ /* onclose follows */ };
+      setTimeout(function(){ if(!done){ done=true; cb(false); } }, 6000);
+    }else{ cb(false); }
+  }).catch(function(){ ptrOpening=false; cb(false); });
+}
+function ensurePtr(){
+  if(ptrReady && ptrWs && ptrWs.readyState===1) return;
+  if(ptrOpening || !isConnected) return;
+  dlog('pointer socket gone — re-acquiring…');
+  openPtrSocket(function(ok){ if(!ok) setStatus('Pointer unavailable — tap Reconnect.', true); });
 }
 
 // Touchpad: one finger drag = move the TV cursor, tap = click,
@@ -658,7 +678,7 @@ function press(name){
     try{
       if(mx||my) ptrWs.send('type:move\ndx:'+mx+'\ndy:'+my+'\n\n');
       if(sx||sy) ptrWs.send('type:scroll\ndx:'+sx+'\ndy:'+sy+'\n\n');
-    }catch(e){}
+    }catch(e){ ptrReady=false; }
   }
   function queue(dx,dy,sdx,sdy){
     accX+=dx; accY+=dy; accSX+=sdx; accSY+=sdy;
@@ -670,10 +690,11 @@ function press(name){
     setTimeout(function(){ pad.classList.remove('tap'); }, 200);
   }
   function doClick(){
-    if(ptrOk()){ try{ ptrWs.send('type:click\n\n'); flash(); dlog('tap -> click sent'); }catch(e){} }
+    if(ptrOk()){ try{ ptrWs.send('type:click\n\n'); flash(); dlog('tap -> click sent'); }catch(e){ ptrReady=false; } }
     else setStatus('Pointer not ready yet — wait a second and retry.', true);
   }
   pad.addEventListener('pointerdown', function(e){
+    ensurePtr(); // re-open the touchpad socket if the TV dropped it while idle
     try{ pad.setPointerCapture(e.pointerId); }catch(x){}
     pts[e.pointerId]={x:e.clientX,y:e.clientY};
     var n=Object.keys(pts).length;
@@ -716,9 +737,12 @@ function press(name){
 
 // Scroll arrows: tap = one nudge, hold = keep scrolling.
 function scrollBy(dx,dy){
-  if(!ptrReady || !ptrWs || ptrWs.readyState!==1){ setStatus('Pointer not ready yet — wait a second and retry.', true); return; }
-  try{ ptrWs.send('type:scroll\ndx:'+dx+'\ndy:'+dy+'\n\n'); }
-  catch(e){ setStatus('Scroll failed.', true); }
+  if(!ptrReady || !ptrWs || ptrWs.readyState!==1){
+    if(!ptrOpening) setStatus('Pointer not ready yet — wait a second and retry.', true);
+    return;
+  }
+  try{ ptrWs.send('type:scroll\ndx:'+dx+'\ndy:'+dy+'\n\n'); setStatus(''); }
+  catch(e){ ptrReady=false; setStatus('Pointer send failed — retry.', true); }
 }
 var scrollBtns=document.querySelectorAll('[data-sdx]');
 for(var si=0; si<scrollBtns.length; si++){
@@ -729,6 +753,7 @@ for(var si=0; si<scrollBtns.length; si++){
     function stop(){ if(iv){ clearInterval(iv); iv=null; } }
     b.addEventListener('pointerdown', function(e){
       e.preventDefault();
+      ensurePtr();
       stop(); scrollBy(dx,dy);
       iv=setInterval(function(){ scrollBy(dx,dy); }, 140);
     });
