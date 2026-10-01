@@ -138,9 +138,9 @@
     <div class="card">
       <h2>Scroll</h2>
       <div class="scrollpad">
-        <div></div><button class="btn" data-sdx="0" data-sdy="-160">▲</button><div></div>
-        <button class="btn" data-sdx="-160" data-sdy="0">◀</button><div></div><button class="btn" data-sdx="160" data-sdy="0">▶</button>
-        <div></div><button class="btn" data-sdx="0" data-sdy="160">▼</button><div></div>
+        <div></div><button class="btn" data-sdx="0" data-sdy="160">▲</button><div></div>
+        <button class="btn" data-sdx="160" data-sdy="0">◀</button><div></div><button class="btn" data-sdx="-160" data-sdy="0">▶</button>
+        <div></div><button class="btn" data-sdx="0" data-sdy="-160">▼</button><div></div>
       </div>
       <p class="hint">Tap an arrow for a nudge, hold it to keep scrolling.</p>
     </div>
@@ -211,7 +211,7 @@
 <script>
 (function(){
 "use strict";
-var APP_VER='v21';
+var APP_VER='v22';
 // Cache the page for offline loads: iOS pauses a-Shell in the background,
 // which also stops its file server. The service worker serves the cached
 // page so it still opens; the relay is only needed as a fallback.
@@ -625,11 +625,15 @@ function heartbeat(){
 function startHeartbeat(){ stopHeartbeat(); hbTimer=setInterval(heartbeat, 10000); }
 function stopHeartbeat(){ if(hbTimer){ clearInterval(hbTimer); hbTimer=null; } asleep=false; }
 
-// Named keys (Back/Home/Exit/OK) go over the main SSAP socket, not the
-// pointer socket: some firmware silently ignores `type:button` there, while
-// ssap://com.webos.service.networkinput/sendInputButton answers for real.
+// Named keys (Back/Home/Exit/OK) go over the pointer socket as `type:button`
+// — the SSAP sendInputButton URI 404s on this TV's firmware. The socket is
+// re-acquired first if the TV dropped it while idle.
 function press(name){
-  cmd('ssap://com.webos.service.networkinput/sendInputButton', {buttonName:name}, name);
+  ensurePtr(function(ok){
+    if(!ok || !ptrOk()){ setStatus('Pointer not ready yet — wait a second and retry.', true); dlog(name+': pointer not ready'); return; }
+    try{ ptrWs.send('type:button\nname:'+name+'\n\n'); setStatus(''); dlog(name+' -> button sent'); }
+    catch(e){ ptrReady=false; setStatus('Pointer send failed.', true); dlog(name+': send threw'); }
+  });
 }
 
 // Pointer-socket lifecycle. The TV can drop the pointer socket while idle;
@@ -654,11 +658,21 @@ function openPtrSocket(cb){
     }else{ cb(false); }
   }).catch(function(){ ptrOpening=false; cb(false); });
 }
-function ensurePtr(){
-  if(ptrReady && ptrWs && ptrWs.readyState===1) return;
-  if(ptrOpening || !isConnected) return;
+function ensurePtr(cb){
+  cb=cb||function(){};
+  if(ptrReady && ptrWs && ptrWs.readyState===1){ cb(true); return; }
+  if(!isConnected){ cb(false); return; }
+  if(ptrOpening){
+    var tries=0;
+    var t=setInterval(function(){
+      tries++;
+      if(!ptrOpening || ptrReady){ clearInterval(t); cb(ptrReady); }
+      else if(tries>20){ clearInterval(t); cb(false); }
+    }, 250);
+    return;
+  }
   dlog('pointer socket gone — re-acquiring…');
-  openPtrSocket(function(ok){ if(!ok) setStatus('Pointer unavailable — tap Reconnect.', true); });
+  openPtrSocket(cb);
 }
 
 // Touchpad: one finger drag = move the TV cursor, tap = click,

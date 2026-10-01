@@ -34,7 +34,7 @@ Implements the webOS pairing handshake (`type: register` with the standard test 
 - `ssap://tv/channelUp` / `channelDown`
 - `ssap://media.controls/play|pause|stop|rewind|fastForward`
 - Pointer input via `ssap://com.webos.service.networkinput/getPointerInputSocket`: touchpad cursor (`type:move`), tap-to-click (`type:click`), two-finger scroll (`type:scroll`); the socket is re-acquired lazily if the TV drops it while idle
-- Named keys (Back/Home/Exit/OK) via `ssap://com.webos.service.networkinput/sendInputButton` (`{"buttonName": ...}`) — some firmware silently ignores `type:button` on the pointer socket
+- Named keys (Back/Home/Exit/OK) via `type:button` on the pointer socket — note: `ssap://com.webos.service.networkinput/sendInputButton` returns 404 on this TV's firmware, so the SSAP path is unusable here
 
 ## How the page reaches the TV
 
