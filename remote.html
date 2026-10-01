@@ -65,6 +65,7 @@
   .media .btn{font-size:17px;padding:12px 4px;}
   .apps{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;}
   #status{font-size:13px;color:var(--dim);text-align:center;min-height:20px;line-height:1.4;}
+  #ver{text-align:center;font-size:11px;color:var(--dim);opacity:.55;margin-top:4px;}
   #status.err{color:var(--accent);}
   #dbg{font:10px/1.6 monospace;color:var(--dim);text-align:left;white-space:pre-wrap;max-height:150px;overflow:auto;margin-top:6px;}
   .hidden{display:none !important;}
@@ -187,11 +188,13 @@
 
   <div id="status"></div>
   <div id="dbg"></div>
+  <div id="ver"></div>
 </div>
 
 <script>
 (function(){
 "use strict";
+var APP_VER='v14';
 // Cache the page for offline loads: iOS pauses a-Shell in the background,
 // which also stops its file server. The service worker serves the cached
 // page so it still opens; the relay is only needed for actual commands.
@@ -206,6 +209,7 @@ var pairingType='PROMPT', lastType='PROMPT';
 
 var $=function(id){return document.getElementById(id);};
 var pill=$('pill'), statusEl=$('status'), setupEl=$('setup'), remoteEl=$('remote');
+$('ver').textContent=APP_VER;
 
 function setPill(txt, cls){ pill.textContent=txt; pill.className='pill'+(cls?' '+cls:''); }
 function setStatus(txt, isErr){ statusEl.textContent=txt||''; statusEl.className=isErr?'err':''; }
