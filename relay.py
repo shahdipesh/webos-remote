@@ -7,13 +7,30 @@ that carries a browser Origin header. Native remote apps don't send one, so
 they pair fine. This relay accepts a plain local WebSocket from the page and
 re-opens it toward the TV with NO Origin header, bridging frames both ways.
 
-Usage (in a-Shell -- just one window, one command):
-    python3 relay.py
-It serves the remote page on http://127.0.0.1:8000/remote.html AND runs the
-WebSocket relay on 127.0.0.1:8765. Open the page in Safari and tap Connect.
+It also keeps its OWN persistent connection to the TV (TvLink) and exposes
+simple HTTP endpoints so iOS Shortcuts / Siri can control the TV:
 
-The page connects to ws://127.0.0.1:8765/?target=<urlencoded ws/wss URL>
-and the relay dials that target. Stdlib only, no pip packages needed.
+    GET /api/tv/status            -> {"ok":true,"connected":true}
+    GET /api/tv/<command>         -> runs one command
+    GET /api/tv/voice?q=<words>   -> matches plain words to a command
+
+Commands: power_off, volume_up, volume_down, mute, play, pause,
+          home, youtube, netflix, channel_up, channel_down, status
+
+Usage (in a-Shell -- just one window, one command):
+    python3 relay.py [--tv 10.0.0.40]
+It serves the remote page on http://127.0.0.1:8000/remote.html, runs the
+WebSocket relay on 127.0.0.1:8765, and the Siri HTTP API on :8000/api/tv/*.
+
+Pairing: the relay registers with the TV as appId "com.lge.test" (same as the
+remote page). The client-key is saved to .tv_client_key (git-ignored). It is
+learned automatically two ways:
+  1. Sniffed from the remote page's own pairing: open remote.html in Safari,
+     tap Connect, allow on the TV -- the key passing through the relay is
+     saved for the relay's own use.
+  2. First direct register: if there is no key yet, the TV shows an "Allow?"
+     prompt -- accept it on the TV and the returned key is saved.
+Stdlib only, no pip packages needed.
 """
 import functools
 import json
@@ -33,6 +50,10 @@ from urllib.parse import urlparse, parse_qs
 LISTEN = ("127.0.0.1", 8765)
 WEB = ("127.0.0.1", 8000)
 GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+HERE = os.path.dirname(os.path.abspath(__file__))
+KEY_FILE = os.path.join(HERE, ".tv_client_key")
+
+TV_LINK = None  # set in main()
 
 
 def log(*a):
@@ -100,6 +121,340 @@ def read_http(s):
     return (lines[0] if lines else ""), hdr
 
 
+def tv_handshake(host, port=3001):
+    """Open a client WebSocket to the TV with NO Origin header."""
+    raw = socket.create_connection((host, port), timeout=8)
+    tv = ssl._create_unverified_context().wrap_socket(raw, server_hostname=host)
+    ckey = base64.b64encode(secrets.token_bytes(16)).decode()
+    tv.sendall(("GET / HTTP/1.1\r\n"
+                "Host: " + host + ":" + str(port) + "\r\n"
+                "Upgrade: websocket\r\n"
+                "Connection: Upgrade\r\n"
+                "Sec-WebSocket-Key: " + ckey + "\r\n"
+                "Sec-WebSocket-Version: 13\r\n\r\n").encode())
+    resp, _ = read_http(tv)
+    if "101" not in resp:
+        tv.close()
+        raise ConnectionError("TV refused websocket upgrade: " + resp[:60])
+    return tv
+
+
+# Same identity the remote page pairs with, so a key learned from the page
+# (or from an earlier relay run) is accepted without a new TV prompt.
+RELAY_MANIFEST = {
+    "forcePairing": False,
+    "pairingType": "PROMPT",
+    "manifest": {
+        "manifestVersion": 1,
+        "appVersion": "1.0",
+        "appId": "com.lge.test",
+        "vendorId": "com.lge",
+        "localizedAppNames": {"": "LG Remote App"},
+        "permissions": [
+            "TEST_SECURE", "CONTROL_INPUT_TEXT", "CONTROL_MOUSE_AND_KEYBOARD",
+            "READ_INSTALLED_APPS", "READ_NOTIFICATIONS", "SEARCH",
+            "WRITE_SETTINGS", "CONTROL_POWER", "READ_CURRENT_CHANNEL",
+            "READ_RUNNING_APPS", "LAUNCH", "LAUNCH_WEBAPP", "APP_TO_APP",
+            "CLOSE", "TEST_OPEN", "TEST_PROTECTED", "CONTROL_AUDIO",
+            "CONTROL_DISPLAY", "CONTROL_INPUT_MEDIA_PLAYBACK",
+            "CONTROL_INPUT_TV", "CONTROL_POWER", "READ_APP_STATUS",
+            "READ_TV_CHANNEL_LIST", "CONTROL_TV_SCREEN", "CONTROL_TV_STANBY",
+            "READ_TV_PROGRAM_INFO", "CONTROL_TV_POWER", "CONTROL_WOL",
+            "READ_POWER_STATE", "READ_SETTINGS",
+        ],
+    },
+}
+
+
+class TvLink:
+    """The relay's own persistent connection to the TV.
+
+    Keeps one registered WebSocket open in a background thread, reconnecting
+    with backoff. Commands from the HTTP API go through request()/notify().
+    """
+
+    def __init__(self, host):
+        self.host = host
+        self.wlock = threading.Lock()   # guards sock + waiters
+        self.sock = None
+        self.seq = 0
+        self.waiters = {}               # id -> [Event, box]
+        self.registered = threading.Event()
+        self.key = self._load_key()
+        threading.Thread(target=self._loop, daemon=True).start()
+
+    def _load_key(self):
+        try:
+            with open(KEY_FILE) as f:
+                return f.read().strip()
+        except OSError:
+            return ""
+
+    def _save_key(self, k):
+        if not k or k == self.key:
+            return
+        self.key = k
+        try:
+            with open(KEY_FILE, "w") as f:
+                f.write(k)
+            os.chmod(KEY_FILE, 0o600)
+            log("saved TV client-key")
+        except OSError as e:
+            log("could not save client-key:", e)
+
+    def note_key(self, k):
+        """A client-key observed on the wire (e.g. the page's pairing)."""
+        self._save_key(k)
+
+    def _loop(self):
+        backoff = 2
+        while True:
+            try:
+                self._serve()
+                backoff = 2
+            except Exception as e:
+                log("tv link down:", e)
+            with self.wlock:
+                self.sock = None
+            self.registered.clear()
+            time.sleep(backoff)
+            backoff = min(backoff * 2, 30)
+
+    def _serve(self):
+        tv = tv_handshake(self.host, 3001)
+        with self.wlock:
+            self.sock = tv
+        payload = dict(RELAY_MANIFEST)
+        payload["client-key"] = self.key
+        send_frame(tv, 0x1, json.dumps(
+            {"id": "relay_reg", "type": "register", "payload": payload}).encode())
+        log("registering with TV as com.lge.test"
+            + (" (have key)" if self.key else " (no key yet -- accept the prompt on the TV)"))
+        tv.settimeout(60)
+        while True:
+            op, data = read_frame(tv)
+            if op == 0x8:
+                raise ConnectionError("TV closed the connection")
+            if op == 0x9:  # ping -> pong
+                with self.wlock:
+                    try:
+                        send_frame(tv, 0xA, data)
+                    except OSError:
+                        pass
+                continue
+            if op != 0x1:
+                continue
+            try:
+                m = json.loads(data.decode())
+            except ValueError:
+                continue
+            if m.get("type") == "registered":
+                k = (m.get("payload") or {}).get("client-key")
+                if k:
+                    self._save_key(k)
+                self.registered.set()
+                log("TV registered")
+                continue
+            mid = m.get("id")
+            if mid:
+                with self.wlock:
+                    w = self.waiters.pop(mid, None)
+                if w:
+                    ev, box = w
+                    box["msg"] = m
+                    ev.set()
+
+    def _send(self, uri, payload, want_reply, timeout):
+        if not self.registered.wait(timeout=25):
+            raise TimeoutError("TV not registered (is it on and on the same Wi-Fi?)")
+        with self.wlock:
+            s = self.sock
+            if s is None:
+                raise ConnectionError("TV socket not open")
+            self.seq += 1
+            mid = "siri%d" % self.seq
+            ev = None
+            box = {}
+            if want_reply:
+                ev = threading.Event()
+                self.waiters[mid] = (ev, box)
+            msg = {"type": "request", "id": mid, "uri": uri}
+            if payload:
+                msg["payload"] = payload
+            send_frame(s, 0x1, json.dumps(msg).encode())
+        if want_reply:
+            if not ev.wait(timeout):
+                with self.wlock:
+                    self.waiters.pop(mid, None)
+                raise TimeoutError("no reply for " + uri)
+            return (box.get("msg") or {}).get("payload") or {}
+        return {}
+
+    def notify(self, uri, payload=None):
+        """Fire-and-forget command."""
+        self._send(uri, payload, False, 0)
+
+    def request(self, uri, payload=None, timeout=8):
+        """Command that waits for the TV's reply payload."""
+        return self._send(uri, payload, True, timeout)
+
+
+# ---------------------------------------------------------------------------
+# Siri command layer
+# ---------------------------------------------------------------------------
+
+def tv_home(link):
+    r = link.request("ssap://com.webos.service.applicationManager/listApps")
+    apps = r.get("apps") or []
+    pick = None
+    for a in apps:
+        aid = a.get("id", "")
+        if "home" in aid and "homebrew" not in aid:
+            pick = aid
+            break
+    if not pick:
+        raise RuntimeError("could not find the launcher app")
+    link.notify("ssap://system.launcher/launch", {"id": pick})
+    return "Back home"
+
+
+def tv_mute(link):
+    v = link.request("ssap://audio/getVolume")
+    muted = not v.get("muted", False)
+    link.notify("ssap://audio/setMuted", {"muted": muted})
+    return "Muted" if muted else "Unmuted"
+
+
+SIMPLE_CMDS = {
+    # name: (uri, payload, spoken confirmation)
+    "power_off":    ("ssap://system/turnOff", {}, "Turning the TV off"),
+    "volume_up":    ("ssap://audio/volumeUp", {}, "Volume up"),
+    "volume_down":  ("ssap://audio/volumeDown", {}, "Volume down"),
+    "play":         ("ssap://media.controls/play", {}, "Playing"),
+    "pause":        ("ssap://media.controls/pause", {}, "Paused"),
+    "channel_up":   ("ssap://tv/channelUp", {}, "Channel up"),
+    "channel_down": ("ssap://tv/channelDown", {}, "Channel down"),
+    "youtube":      ("ssap://system.launcher/launch", {"id": "youtube.leanback.v4"}, "Opening YouTube"),
+    "netflix":      ("ssap://system.launcher/launch", {"id": "netflix"}, "Opening Netflix"),
+}
+
+SPECIAL_CMDS = {"mute": tv_mute, "home": tv_home}
+ALL_CMDS = set(SIMPLE_CMDS) | set(SPECIAL_CMDS)
+
+
+def run_cmd(link, name, repeat=1):
+    if name in SIMPLE_CMDS:
+        uri, payload, say = SIMPLE_CMDS[name]
+        for i in range(max(1, repeat)):
+            if i:
+                time.sleep(0.25)
+            link.notify(uri, payload)
+        return say
+    if name in SPECIAL_CMDS:
+        return SPECIAL_CMDS[name](link)
+    raise ValueError("unknown command: " + name)
+
+
+def voice_to_cmd(q):
+    """Match plain words to (command, repeat). Returns (None, 0) if no match."""
+    q = (q or "").lower()
+    if not q.strip():
+        return None, 0
+    # more specific matches first
+    if "youtube" in q or "you tube" in q:
+        return "youtube", 1
+    if "netflix" in q:
+        return "netflix", 1
+    for w in ("turn off", "power off", "switch off", "shut off", "turn the tv off"):
+        if w in q:
+            return "power_off", 1
+    if "mute" in q or "silence" in q:
+        return "mute", 1
+    if "channel up" in q or "next channel" in q:
+        return "channel_up", 1
+    if "channel down" in q or "previous channel" in q:
+        return "channel_down", 1
+    if "volume up" in q or "louder" in q or "turn it up" in q or "turn up" in q:
+        n = 3 if any(w in q for w in ("a lot", "way up", "much")) else 1
+        return "volume_up", n
+    if "volume down" in q or "quieter" in q or "turn it down" in q or "turn down" in q:
+        n = 3 if any(w in q for w in ("a lot", "way down", "much")) else 1
+        return "volume_down", n
+    if "pause" in q or "hold on" in q:
+        return "pause", 1
+    if q.strip().startswith("play") or " resume" in q:
+        return "play", 1
+    if "home" in q or "main menu" in q:
+        return "home", 1
+    return None, 0
+
+
+class ApiHandler(SimpleHTTPRequestHandler):
+    """File server + /api/tv/* JSON endpoints for Siri Shortcuts."""
+
+    def _json(self, obj, code=200):
+        body = json.dumps(obj).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _api(self):
+        u = urlparse(self.path)
+        path = u.path
+        if path == "/api/tv/status":
+            ok = TV_LINK is not None and TV_LINK.registered.is_set()
+            return self._json({"ok": True, "connected": ok})
+        if path == "/api/tv/voice":
+            q = (parse_qs(u.query).get("q") or [""])[0]
+            cmd, n = voice_to_cmd(q)
+            if not cmd:
+                return self._json({"ok": False,
+                                   "message": "Didn't catch that. Try 'turn off', 'volume up', 'mute', 'YouTube'…"})
+            try:
+                msg = run_cmd(TV_LINK, cmd, n)
+                return self._json({"ok": True, "cmd": cmd, "message": msg})
+            except Exception as e:
+                log("voice cmd failed:", e)
+                return self._json({"ok": False, "message": "TV didn't respond. Is it on?"})
+        if path.startswith("/api/tv/"):
+            cmd = path.rsplit("/", 1)[-1]
+            if cmd not in ALL_CMDS:
+                return self._json({"ok": False, "message": "unknown command: " + cmd}, 404)
+            try:
+                msg = run_cmd(TV_LINK, cmd)
+                return self._json({"ok": True, "cmd": cmd, "message": msg})
+            except Exception as e:
+                log("cmd failed:", e)
+                return self._json({"ok": False, "message": "TV didn't respond. Is it on?"})
+        return None
+
+    def do_GET(self):
+        if self.path.startswith("/api/tv/"):
+            try:
+                self._api()
+            except (OSError, ConnectionError):
+                pass
+            return
+        super().do_GET()
+
+    def log_message(self, *a):
+        pass  # keep a-Shell output clean
+
+
+def sniff_registered(payload):
+    """Save a client-key seen in a bridged page<->TV registration."""
+    try:
+        m = json.loads(payload.decode())
+    except ValueError:
+        return
+    if m.get("type") == "registered":
+        k = (m.get("payload") or {}).get("client-key")
+        if k and TV_LINK:
+            TV_LINK.note_key(k)
+
+
 def handle(page):
     tv = None
     try:
@@ -129,33 +484,12 @@ def handle(page):
                       "Sec-WebSocket-Accept: " + accept + "\r\n\r\n").encode())
         log("page connected, dialing", u.scheme + "://" + host + ":" + str(port) + path)
 
-        raw = socket.create_connection((host, port), timeout=8)
-        if u.scheme == "wss":
-            ctx = ssl._create_unverified_context()
-            tv = ctx.wrap_socket(raw, server_hostname=host)
-        else:
-            tv = raw
-        ckey = base64.b64encode(secrets.token_bytes(16)).decode()
-        # NOTE: deliberately no Origin header -- that is the whole point.
-        tv.sendall(("GET " + path + " HTTP/1.1\r\n"
-                    "Host: " + host + ":" + str(port) + "\r\n"
-                    "Upgrade: websocket\r\n"
-                    "Connection: Upgrade\r\n"
-                    "Sec-WebSocket-Key: " + ckey + "\r\n"
-                    "Sec-WebSocket-Version: 13\r\n\r\n").encode())
-        resp, _ = read_http(tv)
-        if "101" not in resp:
-            log("target refused upgrade:", resp[:60])
-            try:
-                send_frame(page, 0x8, b"")
-            except OSError:
-                pass
-            return
+        tv = tv_handshake(host, port)
         log("target websocket open")
 
         stop = threading.Event()
 
-        def pump(src, dst, mask, name):
+        def pump(src, dst, mask, sniff=None):
             try:
                 while not stop.is_set():
                     op, payload = read_frame(src)
@@ -172,13 +506,18 @@ def handle(page):
                             pass
                     elif op in (0x1, 0x2, 0xA):
                         send_frame(dst, op, payload, mask=mask)
+                        if sniff and op == 0x1:
+                            try:
+                                sniff(payload)
+                            except Exception:
+                                pass
             except (OSError, ConnectionError):
                 pass
             finally:
                 stop.set()
 
-        t1 = threading.Thread(target=pump, args=(page, tv, True, "page->tv"), daemon=True)
-        t2 = threading.Thread(target=pump, args=(tv, page, False, "tv->page"), daemon=True)
+        t1 = threading.Thread(target=pump, args=(page, tv, True), daemon=True)
+        t2 = threading.Thread(target=pump, args=(tv, page, False, sniff_registered), daemon=True)
         t1.start()
         t2.start()
         t1.join()
@@ -276,11 +615,21 @@ def probe(tv_host):
 
 
 def main():
-    if len(sys.argv) > 1 and sys.argv[1] == "--probe":
-        probe(sys.argv[2] if len(sys.argv) > 2 else "10.0.0.40")
+    global TV_LINK
+    args = sys.argv[1:]
+    if args and args[0] == "--probe":
+        probe(args[1] if len(args) > 1 else "10.0.0.40")
         return
-    here = os.path.dirname(os.path.abspath(__file__))
-    # Relay first -- this is the critical path.
+    tv_host = "10.0.0.40"
+    if "--tv" in args:
+        i = args.index("--tv")
+        if i + 1 < len(args):
+            tv_host = args[i + 1]
+    # The relay's own TV link (for the Siri HTTP API) starts first so it is
+    # ready even if nobody opens the remote page.
+    TV_LINK = TvLink(tv_host)
+    log("Siri TV api on http://127.0.0.1:8000/api/tv/<command>  (tv=%s)" % tv_host)
+    # Relay socket -- this is the critical path.
     srv = None
     try:
         srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -292,7 +641,7 @@ def main():
         log("relay port busy (%s): is another relay.py already running? continuing without relay." % e)
     # File server is best-effort: if :8000 is taken by another server, that's fine.
     try:
-        handler = functools.partial(SimpleHTTPRequestHandler, directory=here)
+        handler = functools.partial(ApiHandler, directory=HERE)
         httpd = ThreadingHTTPServer(WEB, handler)
         threading.Thread(target=httpd.serve_forever, daemon=True).start()
         log("serving page on http://%s:%d/remote.html" % WEB)
