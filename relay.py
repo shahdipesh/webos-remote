@@ -33,8 +33,11 @@ learned automatically two ways:
 Stdlib only, no pip packages needed.
 """
 import functools
+import http.client
+import ipaddress
 import json
 import os
+import re
 import socket
 import ssl
 import sys
@@ -389,6 +392,52 @@ def voice_to_cmd(q):
     return None, 0
 
 
+def _lan_ip():
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("10.255.255.255", 1))  # sends nothing; picks the egress interface
+        return s.getsockname()[0]
+    except OSError:
+        return None
+    finally:
+        s.close()
+
+
+def roku_find():
+    """Probe the local /24 for Roku ECP: anything that answers HTTP on
+    :8060 with a success status is treated as a Roku (the port is Roku's)."""
+    from concurrent.futures import ThreadPoolExecutor
+    subs = []
+    base = _lan_ip()
+    if base:
+        subs.append(base.rsplit(".", 1)[0])
+    for s in ("192.168.1", "192.168.0", "10.0.0"):
+        if s not in subs:
+            subs.append(s)
+
+    def probe(ip):
+        try:
+            c = http.client.HTTPConnection(ip, 8060, timeout=0.8)
+            c.request("GET", "/query/device-info")
+            r = c.getresponse()
+            r.read()
+            c.close()
+            return ip if r.status < 500 else None
+        except Exception:
+            return None
+
+    found = []
+    for sub in subs:
+        ips = [sub + "." + str(i) for i in range(1, 255)]
+        with ThreadPoolExecutor(max_workers=32) as ex:
+            for hit in ex.map(probe, ips):
+                if hit:
+                    found.append(hit)
+        if found:
+            break
+    return found
+
+
 class ApiHandler(SimpleHTTPRequestHandler):
     """File server + /api/tv/* JSON endpoints for Siri Shortcuts."""
 
@@ -430,7 +479,59 @@ class ApiHandler(SimpleHTTPRequestHandler):
                 return self._json({"ok": False, "message": "TV didn't respond. Is it on?"})
         return None
 
+    # ---- Roku bridge -------------------------------------------------
+    # The HTTPS-hosted page cannot fetch a Roku's plain-HTTP ECP API
+    # (mixed content), but it can talk to this relay on loopback, which
+    # browsers treat as a trustworthy origin. The relay forwards a narrow,
+    # allowlisted set of ECP calls to the TV on the LAN. GET-only so the
+    # page needs no CORS preflight; responses carry ACAO:* so it can read
+    # them. The relay binds loopback only -- nothing here is reachable
+    # from the network.
+    def _json_cors(self, obj, code=200):
+        body = json.dumps(obj).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _roku(self):
+        path = urlparse(self.path).path
+        if path == "/roku/ping":
+            return self._json_cors({"ok": True, "service": "roku-bridge"})
+        if path == "/roku/find":
+            return self._json_cors({"ok": True, "found": roku_find()})
+        m = re.match(r"^/roku/(\d+\.\d+\.\d+\.\d+)/(keypress|launch|query)/([A-Za-z0-9_%.-]+)$", path)
+        if not m:
+            return self._json_cors({"ok": False, "message": "bad roku path"}, 404)
+        ip, kind, arg = m.groups()
+        try:
+            addr = ipaddress.ip_address(ip)
+        except ValueError:
+            return self._json_cors({"ok": False, "message": "bad ip"}, 400)
+        if not addr.is_private:
+            return self._json_cors({"ok": False, "message": "ip must be private"}, 400)
+        try:
+            conn = http.client.HTTPConnection(ip, 8060, timeout=5)
+            if kind == "query":
+                conn.request("GET", "/query/" + arg)
+            else:
+                conn.request("POST", "/" + kind + "/" + arg, body=b"")
+            resp = conn.getresponse()
+            resp.read()
+            conn.close()
+            return self._json_cors({"ok": resp.status < 400, "status": resp.status})
+        except Exception as e:
+            return self._json_cors({"ok": False, "message": str(e)}, 502)
+
     def do_GET(self):
+        if self.path.startswith("/roku/"):
+            try:
+                self._roku()
+            except (OSError, ConnectionError):
+                pass
+            return
         if self.path.startswith("/api/tv/"):
             try:
                 self._api()

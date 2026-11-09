@@ -244,7 +244,7 @@
 <script>
 (function(){
 "use strict";
-var APP_VER='v31';
+var APP_VER='v32';
 // Cache the page for offline loads: iOS pauses a-Shell in the background,
 // which also stops its file server. The service worker serves the cached
 // page so it still opens; the relay is only needed as a fallback.
@@ -616,7 +616,7 @@ function setBrand(b, skipValidate){
   $('brandRoku').classList.toggle('primary', b==='roku');
   applyBrandUI();
   if(b==='roku' && location.protocol==='https:'){
-    setStatus('Roku note: Safari blocks HTTPS pages from reaching a Roku — its API is plain HTTP and has no secure version. Roku control works from the local copy of this page: run relay.py in a-Shell, then open http://127.0.0.1:8000/remote.html', true);
+    setStatus('Roku note: Roku\'s API is plain HTTP, so from this HTTPS page the commands detour through relay.py on your phone — keep a-Shell running relay.py (latest version from the repo). The local copy at http://127.0.0.1:8000/remote.html needs no detour.', true);
   }
   if(!skipValidate) validateCert(true);
 }
@@ -639,9 +639,20 @@ function rokuBase(){ return 'http://'+$('ip').value.trim()+':8060'; }
 function rokuFetch(path, method, timeoutMs){
   var ctrl=('AbortController' in window)?new AbortController():null;
   var to=setTimeout(function(){ if(ctrl){ try{ctrl.abort();}catch(e){} } }, timeoutMs||5000);
-  return fetch(rokuBase()+path, {method:method||'POST', mode:'no-cors', cache:'no-store', signal:ctrl?ctrl.signal:undefined})
-    .then(function(){ clearTimeout(to); return true; })
-    .catch(function(e){ clearTimeout(to); throw e; });
+  function settle(p){
+    return p.then(function(){ clearTimeout(to); return true; })
+            .catch(function(e){ clearTimeout(to); throw e; });
+  }
+  if(location.protocol==='https:'){
+    // Relay mode: this HTTPS page cannot fetch the Roku's plain-HTTP API,
+    // but it can call relay.py on loopback (a trustworthy origin), and the
+    // relay forwards the command to the TV. GET + ACAO:* on the relay side
+    // means no preflight and a readable JSON result.
+    return settle(fetch('http://127.0.0.1:8000/roku/'+$('ip').value.trim()+path, {cache:'no-store', signal:ctrl?ctrl.signal:undefined})
+      .then(function(r){ return r.json(); })
+      .then(function(j){ if(!j || !j.ok) throw new Error((j&&j.message)||'relay could not reach the Roku'); return true; }));
+  }
+  return settle(fetch(rokuBase()+path, {method:method||'POST', mode:'no-cors', cache:'no-store', signal:ctrl?ctrl.signal:undefined}));
 }
 function rokuPost(path){ return rokuFetch(path, 'POST', 5000); }
 function rokuKey(k){
@@ -672,7 +683,18 @@ function rokuConnect(){
   if(!ip){ setStatus('Enter the TV\'s IP address first.', true); return; }
   try{ localStorage.setItem(LS_IP, ip); }catch(e){}
   if(location.protocol==='https:'){
-    setStatus('This is the HTTPS copy of the page — Safari blocks every Roku command from here, because Roku\'s API is plain HTTP only. Open the local copy instead: run relay.py in a-Shell, then open http://127.0.0.1:8000/remote.html and connect from there.', true);
+    setBusy(true); setPill('Connecting…','busy');
+    setStatus('Reaching the Roku through the relay (a-Shell)…');
+    rokuFetch('/query/device-info', 'GET', 8000).then(function(){
+      isConnected=true;
+      setBusy(false); setPill('Connected','on'); setStatus('');
+      setupEl.classList.add('hidden'); remoteEl.classList.remove('hidden');
+      applyBrandUI();
+      dlog('roku connected (via relay)');
+    }).catch(function(){
+      setBusy(false); setPill('Failed','');
+      setStatus('The relay did not reach a Roku at '+ip+'. Either relay.py is not running in a-Shell (open a-Shell, run: python3 relay.py — use the latest relay.py from the repo), or the TV is off / on another network / Control by mobile apps is not Enabled. Fallback that always works: the local copy at http://127.0.0.1:8000/remote.html', true);
+    });
     return;
   }
   setBusy(true); setPill('Connecting…','busy');
@@ -686,6 +708,22 @@ function rokuConnect(){
     setBusy(false); setPill('Failed','');
     setStatus('No answer from a Roku at '+ip+'. Check the TV is on, on the same Wi-Fi, and Control by mobile apps is Enabled (Settings → System → Advanced system settings).', true);
   });
+}
+
+function relayRokuFind(cb){ // https pages only: ask relay.py (loopback) to scan for a Roku
+  var ctrl=('AbortController' in window)?new AbortController():null;
+  var to=setTimeout(function(){ if(ctrl){ try{ctrl.abort();}catch(e){} } }, 2500);
+  fetch('http://127.0.0.1:8000/roku/ping', {cache:'no-store', signal:ctrl?ctrl.signal:undefined})
+    .then(function(r){ return r.json(); })
+    .then(function(j){
+      clearTimeout(to);
+      if(!j || !j.ok){ cb(null); return null; }
+      if(scanning) $('findStatus').textContent='Relay is up — asking it to scan for a Roku…';
+      return fetch('http://127.0.0.1:8000/roku/find', {cache:'no-store'});
+    })
+    .then(function(r){ if(!r) return null; return r.json(); })
+    .then(function(j){ cb(j && j.found ? j.found : null); })
+    .catch(function(){ clearTimeout(to); cb(null); });
 }
 
 // Find my TV: automatic discovery on the local network, so a changed DHCP IP
@@ -863,6 +901,20 @@ function findTv(){
   setStatus(''); clearFindUI();
   $('findStatus').textContent='Looking for your TV…';
   var skip=getNotTv();
+  if(location.protocol==='https:'){
+    // A Roku can't be probed from an HTTPS page, but the relay can scan
+    // for one server-side. Try that first; fall through to the normal
+    // browser scan (LG / Samsung) when the relay is absent or finds none.
+    relayRokuFind(function(found){
+      if(scanStop){ scanning=false; btn.textContent='🔍 Find my TV'; $('findStatus').textContent='Scan stopped.'; return; }
+      if(found && found.length===1){ scanning=false; btn.textContent='🔍 Find my TV'; onTvFound(found[0], true, 'roku'); return; }
+      if(found && found.length>1){ scanning=false; btn.textContent='🔍 Find my TV'; showCandidates(found.map(function(ip){ return {ip:ip, brand:'roku'}; })); return; }
+      startScan();
+    });
+    return;
+  }
+  startScan();
+  function startScan(){
   guessSubnets(function(subs){
     (function nextSub(i){
       if(scanStop || i>=subs.length){
@@ -920,6 +972,7 @@ function findTv(){
       });
     })(0);
   });
+  }
 }
 $('findBtn').addEventListener('click', findTv);
 
