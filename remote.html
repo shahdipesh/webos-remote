@@ -109,6 +109,14 @@
         <button class="btn primary" id="pinSendBtn">Send</button>
       </div>
     </div>
+    <div style="height:14px"></div>
+    <h2>Certificate</h2>
+    <p class="hint">The TV uses a self-signed certificate, and the browser decides whether to trust it — a web page can't switch that off. What this page can do is <b>validate</b> it: the check below tries the TV's secure handshake. If it completes, the certificate is trusted and Connect will work. If not, accept the certificate once in Safari and validate again.</p>
+    <div class="row">
+      <button class="btn small" id="certCheckBtn">Validate certificate</button>
+      <button class="btn small" id="certOpenBtn">Accept certificate…</button>
+    </div>
+    <p class="hint" id="certStatus">Certificate: not checked yet.</p>
     <p class="hint" id="setupHint">First time: the TV should show a pairing prompt — accept it with your normal remote. If that fails, use PIN pairing.<br><br>The page connects to the TV directly (no extra software needed). If the direct route ever fails it falls back to a local relay — for that, run <code>python3 relay.py</code> in a-Shell, which also serves this page over your Wi-Fi.</p>
   </div>
 
@@ -222,7 +230,7 @@
 <script>
 (function(){
 "use strict";
-var APP_VER='v26';
+var APP_VER='v27';
 // Cache the page for offline loads: iOS pauses a-Shell in the background,
 // which also stops its file server. The service worker serves the cached
 // page so it still opens; the relay is only needed as a fallback.
@@ -408,6 +416,53 @@ function sendPin(){
 
 function setBusy(b){ $('connectBtn').disabled=b; $('pinBtn').disabled=b; }
 
+// Certificate validation. A page cannot disable TLS certificate checks for a
+// WebSocket -- the browser enforces them. What it can do is test whether the
+// TV's self-signed certificate is already trusted: if the secure handshake to
+// wss://<ip>:3001 completes (the socket opens), Safari has accepted the cert;
+// if the socket dies before opening, it hasn't. The probe uses the same
+// null-origin Sock route as the real connection and closes immediately,
+// without sending a register, so it leaves no pairing state on the TV.
+var LS_CERT='webos_cert_ok_ip', certProbing=false;
+function setCertStatus(txt, state){
+  var el=$('certStatus'); if(!el) return;
+  el.textContent=txt;
+  el.style.color = state===true ? 'var(--ok)' : (state===false ? '#fda4af' : '');
+}
+function validateCert(auto){
+  var ip=$('ip').value.trim();
+  if(!ip){ if(!auto) setCertStatus('Enter the TV\'s IP address above first.', false); return; }
+  if(certProbing) return;
+  certProbing=true;
+  setCertStatus('Validating certificate for '+ip+'…', null);
+  var done=false, probe=null;
+  var timer=setTimeout(function(){ finish(false, 'timed out'); }, 8000);
+  function finish(ok, why){
+    if(done) return; done=true; certProbing=false; clearTimeout(timer);
+    try{ if(probe) probe.close(); }catch(e){}
+    if(ok){
+      try{ localStorage.setItem(LS_CERT, ip); }catch(e){}
+      setCertStatus('✓ Certificate trusted — the TV\'s certificate is accepted. You can connect.', true);
+      dlog('cert probe: trusted');
+    }else{
+      setCertStatus('✗ Certificate not accepted yet'+(why?' ('+why+')':'')+'. Tap "Accept certificate…", then in Safari: Show Details → visit this website. Come back here and validate again.', false);
+      dlog('cert probe: not trusted');
+    }
+  }
+  try{ probe=new Sock('wss://'+ip+':3001/'); }
+  catch(e){ finish(false, 'could not start'); return; }
+  probe.onopen=function(){ finish(true); };
+  probe.onclose=function(){ finish(false); };
+  probe.onerror=function(){ /* onclose follows */ };
+}
+$('certCheckBtn').addEventListener('click', function(){ validateCert(false); });
+$('certOpenBtn').addEventListener('click', function(){
+  var ip=$('ip').value.trim();
+  if(!ip){ setCertStatus('Enter the TV\'s IP address above first.', false); return; }
+  window.open('https://'+ip+':3001', '_blank');
+  setCertStatus('Opened the TV\'s certificate page. In Safari tap Show Details → visit this website, then come back and tap Validate certificate.', null);
+});
+
 // Sock: WebSocket-compatible wrapper whose connection is opened from inside a
 // hidden sandboxed iframe (socket.html). The iframe has an opaque origin, so
 // its handshake carries "Origin: null" -- which the TV accepts (relay.py
@@ -545,6 +600,8 @@ function onFail(msg){
   var ip=$('ip').value.trim();
   setPill('Failed','');
   setStatus(msg+' Tip: the page tries a direct connection first, then a local relay — if it falls back to the relay, make sure relay.py is running in a-Shell (python3 relay.py). Also check: Settings → Network → LG Connect Apps is ON.', true);
+  var okIp=null; try{ okIp=localStorage.getItem(LS_CERT); }catch(e){}
+  if(okIp!==ip) setCertStatus('Connection failed — an unaccepted certificate causes exactly this. Validate the certificate above.', false);
 }
 
 function onMessage(ev){
@@ -902,6 +959,15 @@ try{
   if(saved) $('ip').value=saved;
   var qm=/[?&]tv=([^&]+)/.exec(location.search);
   if(qm){ var tip=decodeURIComponent(qm[1]).trim(); if(tip) $('ip').value=tip; }
+}catch(e){}
+// auto-validate the certificate on load when an IP is known
+try{
+  var curIp=$('ip').value.trim();
+  if(curIp){
+    if(localStorage.getItem(LS_CERT)===curIp)
+      setCertStatus('Certificate: trusted at last check — validating again…', null);
+    validateCert(true);
+  }
 }catch(e){}
 })();
 </script>
