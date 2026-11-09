@@ -91,7 +91,12 @@
   <!-- SETUP -->
   <div id="setup" class="card">
     <h2>Connect to your TV</h2>
-    <p>Tap <b>Find my TV</b> — the page scans your Wi-Fi and locates the TV on its own, even if its IP changed. Your phone must be on the same Wi-Fi as the TV, and the TV must be on.</p>
+    <div class="row">
+      <button class="btn small primary" id="brandLg">LG webOS</button>
+      <button class="btn small" id="brandSamsung">Samsung</button>
+    </div>
+    <div style="height:10px"></div>
+    <p>Tap <b>Find my TV</b> — the page scans your Wi-Fi and locates the TV on its own, even if its IP changed, and detects whether it's LG or Samsung. Your phone must be on the same Wi-Fi as the TV, and the TV must be on.</p>
     <div class="row">
       <button class="btn primary" id="findBtn">🔍 Find my TV</button>
     </div>
@@ -137,7 +142,7 @@
 
     <div class="card">
       <h2>Touchpad</h2>
-      <div id="pad"><span class="padhint">Drag to move the cursor<br>Tap to click &middot; two fingers to scroll</span></div>
+      <div id="pad"><span class="padhint" id="padHint">Drag to move the cursor<br>Tap to click &middot; two fingers to scroll</span></div>
       <div style="height:10px"></div>
       <div class="row">
         <button class="btn small" id="padClick">Click</button>
@@ -170,7 +175,7 @@
       <p class="hint">Tap an arrow for a nudge, hold it to keep scrolling.</p>
     </div>
 
-    <div class="card">
+    <div class="card" id="kbCard">
       <h2>Keyboard</h2>
       <div class="pinrow">
         <input id="kbInput" type="text" placeholder="Type for the TV…" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="send">
@@ -236,7 +241,7 @@
 <script>
 (function(){
 "use strict";
-var APP_VER='v29';
+var APP_VER='v30';
 // Cache the page for offline loads: iOS pauses a-Shell in the background,
 // which also stops its file server. The service worker serves the cached
 // page so it still opens; the relay is only needed as a fallback.
@@ -430,6 +435,10 @@ function setBusy(b){ $('connectBtn').disabled=b; $('pinBtn').disabled=b; }
 // null-origin Sock route as the real connection and closes immediately,
 // without sending a register, so it leaves no pairing state on the TV.
 var LS_CERT='webos_cert_ok_ip', certProbing=false;
+function certOkFor(ip){
+  var v=null; try{ v=localStorage.getItem(LS_CERT); }catch(e){}
+  return v===ip || v===(brand+':'+ip); // bare ip = legacy entry from the LG-only versions
+}
 function setCertStatus(txt, state){
   var el=$('certStatus'); if(!el) return;
   el.textContent=txt;
@@ -438,6 +447,13 @@ function setCertStatus(txt, state){
 function validateCert(auto){
   var ip=$('ip').value.trim();
   if(!ip){ if(!auto) setCertStatus('Enter the TV\'s IP address above first.', false); return; }
+  if(brand==='samsung' && auto){
+    // No auto-probe for Samsung: the check opens the real control channel,
+    // which can pop an allow prompt on the TV. Manual taps only.
+    if(certOkFor(ip)){ setCertStatus('Certificate: trusted at last check for this Samsung TV.', true); }
+    else setCertStatus('Certificate: tap Validate certificate to check this Samsung TV — the TV may show an allow prompt, and allowing it pairs the remote at the same time.', null);
+    return;
+  }
   if(certProbing) return;
   certProbing=true;
   setCertStatus('Validating certificate for '+ip+'…', null);
@@ -447,7 +463,7 @@ function validateCert(auto){
     if(done) return; done=true; certProbing=false; clearTimeout(timer);
     try{ if(probe) probe.close(); }catch(e){}
     if(ok){
-      try{ localStorage.setItem(LS_CERT, ip); }catch(e){}
+      try{ localStorage.setItem(LS_CERT, brand+':'+ip); }catch(e){}
       setCertStatus('✓ Certificate trusted — the TV\'s certificate is accepted. You can connect.', true);
       dlog('cert probe: trusted');
     }else{
@@ -455,9 +471,14 @@ function validateCert(auto){
       dlog('cert probe: not trusted');
     }
   }
-  try{ probe=new Sock('wss://'+ip+':3001/'); }
+  try{ probe = (brand==='samsung') ? new WebSocket(samsungUrl(ip)) : new Sock('wss://'+ip+':3001/'); }
   catch(e){ finish(false, 'could not start'); return; }
   probe.onopen=function(){ finish(true); };
+  if(brand==='samsung'){
+    probe.onmessage=function(ev){ // a manual check can also complete pairing: keep the token
+      try{ var m=JSON.parse(ev.data); if(m.event==='ms.channel.connect' && m.data && m.data.token){ try{ localStorage.setItem(LS_TOKEN, m.data.token); }catch(e){} } }catch(e){}
+    };
+  }
   probe.onclose=function(){ finish(false); };
   probe.onerror=function(){ /* onclose follows */ };
 }
@@ -465,22 +486,148 @@ $('certCheckBtn').addEventListener('click', function(){ validateCert(false); });
 $('certOpenBtn').addEventListener('click', function(){
   var ip=$('ip').value.trim();
   if(!ip){ setCertStatus('Enter the TV\'s IP address above first.', false); return; }
-  window.open('https://'+ip+':3001', '_blank');
+  window.open('https://'+ip+':'+(brand==='samsung'?'8002':'3001'), '_blank');
   setCertStatus('Opened the TV\'s certificate page. In Safari tap Show Details → visit this website, then come back and tap Validate certificate.', null);
 });
 
+// ---------- Samsung (Tizen) driver ----------
+// Samsung TVs take remote commands on wss://<ip>:8002, channel
+// samsung.remote.control. The first connect (no token) makes the TV show an
+// allow prompt; the ms.channel.connect event then returns a token, which is
+// stored and presented on later connects. Keys are ms.remote.control calls.
+// There is no pointer socket and no text-input API on Samsung, so the
+// touchpad sends arrow keys and the keyboard card is hidden for this brand.
+var LS_TOKEN='samsung_token', LS_BRAND='tv_brand';
+var brand='lg';
+try{ var sb0=localStorage.getItem(LS_BRAND); if(sb0==='samsung'||sb0==='lg') brand=sb0; }catch(e){}
+var SKEY={UP:'KEY_UP',DOWN:'KEY_DOWN',LEFT:'KEY_LEFT',RIGHT:'KEY_RIGHT',ENTER:'KEY_ENTER',BACK:'KEY_RETURN',HOME:'KEY_HOME',EXIT:'KEY_EXIT'};
+function samsungUrl(ip){
+  var tok=null; try{ tok=localStorage.getItem(LS_TOKEN); }catch(e){}
+  return 'wss://'+ip+':8002/api/v2/channels/samsung.remote.control?name='+btoa('Web Remote')+(tok?('&token='+encodeURIComponent(tok)):'');
+}
+function samsungSend(obj){
+  if(!ws || ws.readyState!==1) return false;
+  try{ ws.send(JSON.stringify(obj)); return true; }catch(e){ return false; }
+}
+function samsungKey(key){
+  if(samsungSend({method:'ms.remote.control', params:{Cmd:'Click', DataOfCmd:key, Option:'false', TypeOfRemote:'SendRemoteKey'}})) setStatus('');
+  else setStatus('Not connected.', true);
+}
+var samsungAppsResolve=null;
+function samsungOnMessage(ev){
+  var m; try{ m=JSON.parse(ev.data); }catch(e){ return; }
+  dlog('samsung recv '+(m.event||'?'));
+  if(m.event==='ms.channel.connect'){
+    if(m.data && m.data.token){ try{ localStorage.setItem(LS_TOKEN, m.data.token); }catch(e){} }
+    samsungConnected();
+  }else if(m.event==='ms.channel.unauthorized'){
+    setBusy(false); setPill('Rejected','');
+    setStatus('The TV rejected this remote. On the TV: Settings → General → External Device Manager → Device Connection Manager → Device List — allow "Web Remote". Then Connect again.', true);
+  }else if(m.event==='ed.installedApp.get'){
+    if(samsungAppsResolve){ var r=samsungAppsResolve; samsungAppsResolve=null; r((m.data&&m.data.data)||[]); }
+  }
+}
+function samsungConnect(){
+  var ip=$('ip').value.trim();
+  if(!ip){ setStatus('Enter the TV\'s IP address first.', true); return; }
+  try{ localStorage.setItem(LS_IP, ip); }catch(e){}
+  disconnect(false);
+  setBusy(true);
+  setPill('Connecting…','busy');
+  setStatus('Connecting to the Samsung TV at '+ip+'… if the TV shows a prompt, allow "Web Remote".');
+  var opened=false, settled=false;
+  try{ ws=new WebSocket(samsungUrl(ip)); }catch(e){ samsungFail(); return; }
+  var to=setTimeout(function(){
+    if(!isConnected) setStatus('Still waiting for the TV. If a prompt is showing on the TV, allow it — this connects on its own once you do. If nothing appeared, check the certificate below.', true);
+  }, 10000);
+  ws.onopen=function(){ opened=true; dlog('samsung ws open, awaiting connect event'); };
+  ws.onmessage=function(ev){ clearTimeout(to); samsungOnMessage(ev); };
+  ws.onerror=function(){ if(!opened && !settled){ settled=true; clearTimeout(to); samsungFail(); } };
+  ws.onclose=function(){
+    clearTimeout(to);
+    if(brand!=='samsung') return;
+    if(isConnected) samsungClosed();
+    else if(!settled){ settled=true; samsungFail(); }
+  };
+}
+function samsungConnected(){
+  isConnected=true; viaRelay=false;
+  setBusy(false);
+  setPill('Connected','on');
+  setStatus('');
+  setupEl.classList.add('hidden'); remoteEl.classList.remove('hidden');
+  applyBrandUI();
+  dlog('samsung connected');
+}
+function samsungFail(){
+  setBusy(false);
+  setPill('Failed','');
+  var ip=$('ip').value.trim();
+  setStatus('Could not connect to the Samsung TV at '+ip+'. Usual causes: TV off or on a different network, the certificate not accepted yet (see Certificate below), or the TV declined the remote.', true);
+  if(!certOkFor(ip)) setCertStatus('Connection failed — for Samsung, an unaccepted certificate causes exactly this. Validate the certificate above.', false);
+}
+function samsungClosed(){
+  ws=null; isConnected=false;
+  setPill('Disconnected','');
+  remoteEl.classList.add('hidden'); setupEl.classList.remove('hidden');
+  setBusy(false);
+  setStatus('Disconnected from the Samsung TV.', false);
+}
+function samsungGetApps(){
+  return new Promise(function(resolve,reject){
+    if(!ws || ws.readyState!==1){ reject(new Error('not connected')); return; }
+    samsungAppsResolve=resolve;
+    setTimeout(function(){ if(samsungAppsResolve===resolve){ samsungAppsResolve=null; reject(new Error('timeout')); } }, 6000);
+    samsungSend({method:'ms.channel.emit', params:{event:'ed.installedApp.get', to:'host'}});
+  });
+}
+function samsungLaunch(appId){
+  samsungSend({method:'ms.channel.emit', params:{event:'ed.apps.launch', to:'host', data:{action_type:'DEEP_LINK', appId:String(appId)}}});
+}
+function samsungLaunchApp(nameKey){
+  var want={netflix:/netflix/i, youtube:/youtube/i, amazon:/prime|amazon/i}[nameKey];
+  var fallback={netflix:'11101200001', youtube:'111299001912', amazon:'3201512006785'}[nameKey];
+  setStatus('Launching…');
+  samsungGetApps().then(function(apps){
+    var id=fallback;
+    for(var i=0;i<apps.length;i++){ if(want.test(String(apps[i].name||''))){ id=apps[i].appId||apps[i].id||fallback; break; } }
+    dlog('samsung app '+nameKey+' -> '+id);
+    samsungLaunch(id); setStatus('');
+  }).catch(function(){ samsungLaunch(fallback); setStatus(''); });
+}
+function applyBrandUI(){
+  var sam = brand==='samsung';
+  $('kbCard').classList.toggle('hidden', sam);
+  $('padHint').innerHTML = sam ? 'Drag = arrow keys &middot; tap = OK<br>Two fingers = scroll keys'
+                               : 'Drag to move the cursor<br>Tap to click &middot; two fingers to scroll';
+  $('pinBtn').classList.toggle('hidden', sam);
+  $('powerBtn').textContent = sam ? '⏻ Power' : '⏻ Power off';
+  if(sam) $('volVal').textContent='';
+}
+function setBrand(b, skipValidate){
+  brand=b;
+  try{ localStorage.setItem(LS_BRAND, b); }catch(e){}
+  $('brandLg').classList.toggle('primary', b==='lg');
+  $('brandSamsung').classList.toggle('primary', b==='samsung');
+  applyBrandUI();
+  if(!skipValidate) validateCert(true);
+}
+$('brandLg').addEventListener('click', function(){ setBrand('lg'); });
+$('brandSamsung').addEventListener('click', function(){ setBrand('samsung'); });
+
 // Find my TV: automatic discovery on the local network, so a changed DHCP IP
-// doesn't matter. A page can't do ping/mDNS scans, so this probes the TV's
-// secure port (https://<ip>:3001) across the subnet and reads the *timing* of
-// each failure: nothing there = the probe hangs to its timeout; a live host
-// with the port closed = near-instant reset; a TLS server (the TV) is slower
-// because the browser starts a handshake and receives the certificate before
-// aborting. Raw timing alone is noisy on Wi-Fi, so a candidate must also:
-//   - beat an adaptive baseline (the subnet's own fast-response cluster), and
-//   - show a per-host delta: port 3001 much slower than a closed control
-//     port (3002) on the SAME host, which cancels out Wi-Fi jitter, and
-//   - ideally open a real wss socket (only possible when its certificate was
-//     accepted before) -- that is conclusive.
+// doesn't matter. A page can't do ping/mDNS scans, so this probes the brands'
+// secure ports (LG webOS https://<ip>:3001, Samsung https://<ip>:8002) across
+// the subnet and reads the *timing* of each failure: nothing there = the
+// probe hangs to its timeout; a live host with the port closed = near-instant
+// reset; a TLS server (a TV) is slower because the browser starts a handshake
+// and receives the certificate before aborting. Raw timing alone is noisy on
+// Wi-Fi, so a candidate must also:
+//   - beat an adaptive baseline (that port's own fast-response cluster), and
+//   - show a per-host delta: the brand port much slower than a closed control
+//     port on the SAME host, which cancels out Wi-Fi jitter, and
+//   - ideally open a real control socket (only possible when its certificate
+//     was accepted before) -- that is conclusive, brand included.
 // IPs the user rejects with "Not my TV" are remembered and skipped.
 var LS_NOTTV='webos_not_tv';
 function getNotTv(){ try{ return JSON.parse(localStorage.getItem(LS_NOTTV)||'[]'); }catch(e){ return []; } }
@@ -489,7 +636,7 @@ function probePort(ip, port, timeoutMs){
   return new Promise(function(resolve){
     var t0=performance.now(), settled=false;
     var ctrl=('AbortController' in window)?new AbortController():null;
-    function finish(){ if(settled) return; settled=true; clearTimeout(to); resolve({ip:ip, ms:performance.now()-t0}); }
+    function finish(){ if(settled) return; settled=true; clearTimeout(to); resolve({ip:ip, port:port, ms:performance.now()-t0}); }
     var to=setTimeout(function(){ if(ctrl){ try{ctrl.abort();}catch(e){} } finish(); }, timeoutMs);
     fetch('https://'+ip+':'+port+'/', {mode:'no-cors', cache:'no-store', signal:ctrl?ctrl.signal:undefined})
       .then(finish).catch(finish); // the outcome doesn't matter; elapsed time is the signal
@@ -500,7 +647,7 @@ function medianOf(nums){
   var a=nums.slice().sort(function(x,y){ return x-y; });
   return a.length?a[Math.floor(a.length/2)]:0;
 }
-function trySockOpen(ip){ // conclusive when it works: cert already trusted + a real webOS socket answers
+function trySockOpen(ip){ // LG: conclusive when it works (cert trusted + a real webOS socket answers)
   return new Promise(function(resolve){
     var done=false, s=null;
     var to=setTimeout(function(){ finish(false); }, 3500);
@@ -511,12 +658,26 @@ function trySockOpen(ip){ // conclusive when it works: cert already trusted + a 
     s.onerror=function(){};
   });
 }
-function confirmTV(ip){ // per-host delta: 3001 (TLS) vs 3002 (closed) on the same host
-  return Promise.all([probeTLS(ip,1000), probeTLS(ip,1000), probeTLS(ip,1000),
-                      probePort(ip,3002,1000), probePort(ip,3002,1000)]).then(function(rs){
+function trySamsungOpen(ip){ // Samsung: socket opening at all means TLS is trusted on the Samsung port
+  return new Promise(function(resolve){
+    var done=false, opened=false, s=null;
+    var to=setTimeout(function(){ finish(opened); }, 4500);
+    function finish(ok){ if(done) return; done=true; clearTimeout(to); try{ if(s) s.close(); }catch(e){} resolve(ok); }
+    try{ s=new WebSocket(samsungUrl(ip)); }catch(e){ finish(false); return; }
+    s.onopen=function(){ opened=true; };
+    s.onmessage=function(ev){
+      try{ var m=JSON.parse(ev.data); if(m.event==='ms.channel.connect'){ if(m.data&&m.data.token){ try{ localStorage.setItem(LS_TOKEN, m.data.token); }catch(e){} } finish(true); } }catch(e){}
+    };
+    s.onclose=function(){ finish(false); };
+    s.onerror=function(){};
+  });
+}
+function confirmDelta(ip, port, ctlPort){ // brand port (TLS) vs closed control port, same host
+  return Promise.all([probePort(ip,port,1000), probePort(ip,port,1000), probePort(ip,port,1000),
+                      probePort(ip,ctlPort,1000), probePort(ip,ctlPort,1000)]).then(function(rs){
     var mTls=medianOf([rs[0].ms, rs[1].ms, rs[2].ms]);
     var mCtl=medianOf([rs[3].ms, rs[4].ms]);
-    dlog('confirm '+ip+': tls='+Math.round(mTls)+'ms ctl='+Math.round(mCtl)+'ms');
+    dlog('confirm '+ip+':'+port+' tls='+Math.round(mTls)+'ms ctl='+Math.round(mCtl)+'ms');
     return (mTls>=40 && (mTls-mCtl)>=25) ? {ip:ip, score:mTls-mCtl} : null;
   });
 }
@@ -531,10 +692,10 @@ function scanSubnet(sub, skip){
           var ip=sub+'.'+n;
           if(skip.indexOf(ip)>=0){ checked++; return; }
           active++;
-          probeTLS(ip,1000).then(function(r){
+          Promise.all([probePort(ip,3001,1000), probePort(ip,8002,1000)]).then(function(rs){
             active--; checked++;
             if(scanning) $('findStatus').textContent='Scanning '+sub+'.0/24… '+checked+'/254';
-            results.push(r);
+            results.push(rs[0]); results.push(rs[1]);
             pump();
           });
         })(next++);
@@ -580,22 +741,24 @@ function showNotTv(ip){
   });
   $('findResults').appendChild(b);
 }
-function onTvFound(ip, sure){
+function brandName(b){ return b==='samsung'?'Samsung':'LG webOS'; }
+function onTvFound(ip, sure, foundBrand){
+  if(foundBrand) setBrand(foundBrand, true);
   $('ip').value=ip;
   try{ localStorage.setItem(LS_IP, ip); }catch(e){}
-  $('findStatus').textContent=(sure?'✓ Found your TV at ':'Possible TV at ')+ip+'.';
-  setStatus('TV at '+ip+'. Now check the certificate below, then Connect.');
-  dlog('find: TV at '+ip+(sure?' (verified)':' (timing match)'));
+  $('findStatus').textContent=(sure?'✓ Found your ':'Possible ')+brandName(brand)+' TV at '+ip+'.';
+  setStatus('TV at '+ip+' ('+brandName(brand)+'). Now check the certificate below, then Connect.');
+  dlog('find: '+brand+' TV at '+ip+(sure?' (verified)':' (timing match)'));
   showNotTv(ip);
-  validateCert(true); // refresh the certificate line for the (possibly new) IP
+  validateCert(true); // refresh the certificate line for the (possibly new) IP and brand
 }
 function showCandidates(list){
   clearFindUI();
   $('findStatus').textContent='More than one device looks TV-like. Tap the one that is your TV:';
   list.forEach(function(c){
     var b=document.createElement('button');
-    b.className='btn small'; b.textContent='📺 '+c.ip;
-    b.addEventListener('click', function(){ onTvFound(c.ip, false); });
+    b.className='btn small'; b.textContent='📺 '+c.ip+' · '+brandName(c.brand);
+    b.addEventListener('click', function(){ onTvFound(c.ip, false, c.brand); });
     $('findResults').appendChild(b);
   });
   var none=document.createElement('button');
@@ -624,27 +787,37 @@ function findTv(){
       }
       scanSubnet(subs[i], skip).then(function(results){
         if(scanStop){ nextSub(subs.length); return; }
-        var fast=results.filter(function(r){ return r.ms<700; }).map(function(r){ return r.ms; });
-        var baseline=fast.length?medianOf(fast):10;
-        var cutoff=Math.max(40, baseline+35);
-        var cands=results.filter(function(r){ return r.ms>=cutoff && r.ms<=700; })
-                         .sort(function(a,b){ return b.ms-a.ms; })
-                         .map(function(r){ return r.ip; })
-                         .slice(0,6);
-        dlog('scan '+subs[i]+': baseline='+Math.round(baseline)+'ms cutoff='+Math.round(cutoff)+'ms candidates='+cands.length);
+        var cands=[];
+        [[3001,'lg'],[8002,'samsung']].forEach(function(pb){
+          var rs=results.filter(function(r){ return r.port===pb[0]; });
+          var fast=rs.filter(function(r){ return r.ms<700; }).map(function(r){ return r.ms; });
+          var baseline=fast.length?medianOf(fast):10;
+          var cutoff=Math.max(40, baseline+35);
+          rs.filter(function(r){ return r.ms>=cutoff && r.ms<=700; })
+            .sort(function(a,b){ return b.ms-a.ms; })
+            .slice(0,4)
+            .forEach(function(r){ cands.push({ip:r.ip, brand:pb[1], ms:r.ms}); });
+          dlog('scan '+subs[i]+' port '+pb[0]+': baseline='+Math.round(baseline)+'ms cutoff='+Math.round(cutoff)+'ms');
+        });
+        cands.sort(function(a,b){ return b.ms-a.ms; });
+        cands=cands.slice(0,6);
         (function nextCand(j, likely){
           if(scanStop){ nextSub(subs.length); return; }
           if(j>=cands.length){
-            if(likely.length===1){ scanning=false; btn.textContent='🔍 Find my TV'; onTvFound(likely[0].ip, false); }
+            if(likely.length===1){ scanning=false; btn.textContent='🔍 Find my TV'; onTvFound(likely[0].ip, false, likely[0].brand); }
             else if(likely.length>1){ scanning=false; btn.textContent='🔍 Find my TV'; showCandidates(likely); }
             else nextSub(i+1);
             return;
           }
-          $('findStatus').textContent='Checking a possible TV at '+cands[j]+'…';
-          trySockOpen(cands[j]).then(function(open){
-            if(open){ scanning=false; btn.textContent='🔍 Find my TV'; onTvFound(cands[j], true); return; }
-            confirmTV(cands[j]).then(function(hit){
-              if(hit) likely.push(hit);
+          var c=cands[j];
+          $('findStatus').textContent='Checking a possible TV at '+c.ip+'…';
+          var openTest = c.brand==='samsung' ? trySamsungOpen(c.ip) : trySockOpen(c.ip);
+          openTest.then(function(open){
+            if(open){ scanning=false; btn.textContent='🔍 Find my TV'; onTvFound(c.ip, true, c.brand); return; }
+            var ctl = c.brand==='samsung' ? 8003 : 3002;
+            var port = c.brand==='samsung' ? 8002 : 3001;
+            confirmDelta(c.ip, port, ctl).then(function(hit){
+              if(hit) likely.push({ip:c.ip, brand:c.brand});
               nextCand(j+1, likely);
             });
           });
@@ -792,8 +965,7 @@ function onFail(msg){
   var ip=$('ip').value.trim();
   setPill('Failed','');
   setStatus(msg+' Tip: the page tries a direct connection first, then a local relay — if it falls back to the relay, make sure relay.py is running in a-Shell (python3 relay.py). Also check: Settings → Network → LG Connect Apps is ON.', true);
-  var okIp=null; try{ okIp=localStorage.getItem(LS_CERT); }catch(e){}
-  if(okIp!==ip) setCertStatus('Connection failed — an unaccepted certificate causes exactly this. Validate the certificate above.', false);
+  if(!certOkFor(ip)) setCertStatus('Connection failed — an unaccepted certificate causes exactly this. Validate the certificate above.', false);
 }
 
 function onMessage(ev){
@@ -888,6 +1060,7 @@ function stopHeartbeat(){ if(hbTimer){ clearInterval(hbTimer); hbTimer=null; } a
 // Home: this TV's firmware ignores pointer-socket button presses, so find the
 // home/launcher app on the TV itself and launch it instead of guessing the ID.
 function goHome(){
+  if(brand==='samsung'){ samsungKey('KEY_HOME'); return; }
   press('HOME');
   request('ssap://com.webos.applicationManager/listApps').then(function(r){
     var apps=(r && r.apps)||[], home=null, i, id;
@@ -908,6 +1081,7 @@ function goHome(){
 }
 // Exit: close whatever app is in the foreground (the closest SSAP to EXIT).
 function goExit(){
+  if(brand==='samsung'){ samsungKey('KEY_EXIT'); return; }
   press('EXIT');
   request('ssap://com.webos.applicationManager/getForegroundAppInfo').then(function(r){
     var appId=r && r.appId;
@@ -918,6 +1092,7 @@ function goExit(){
 }
 function ptrOk(){ return ptrReady && ptrWs && ptrWs.readyState===1; }
 function press(name){
+  if(brand==='samsung'){ samsungKey(SKEY[name]||('KEY_'+name)); return; }
   ensurePtr(function(ok){
     if(!ok || !ptrOk()){ setStatus('Pointer not ready yet — wait a second and retry.', true); dlog(name+': pointer not ready'); return; }
     try{ ptrWs.send('type:button\nname:'+name+'\n\n'); setStatus(''); dlog(name+' -> button sent'); }
@@ -976,6 +1151,14 @@ function ensurePtr(cb){
     var mx=Math.round(accX*SENS), my=Math.round(accY*SENS);
     var sx=Math.round(accSX*SSENS), sy=Math.round(accSY*SSENS);
     accX=0; accY=0; accSX=0; accSY=0;
+    if(brand==='samsung'){
+      var kx=Math.max(-3,Math.min(3,Math.round(mx/70))), ky=Math.max(-3,Math.min(3,Math.round(my/70)));
+      while(kx>0){ samsungKey('KEY_RIGHT'); kx--; } while(kx<0){ samsungKey('KEY_LEFT'); kx++; }
+      while(ky>0){ samsungKey('KEY_DOWN'); ky--; } while(ky<0){ samsungKey('KEY_UP'); ky++; }
+      if(sy<=-40) samsungKey('KEY_DOWN'); else if(sy>=40) samsungKey('KEY_UP');
+      if(sx<=-40) samsungKey('KEY_RIGHT'); else if(sx>=40) samsungKey('KEY_LEFT');
+      return;
+    }
     if(!ptrOk() || (!mx && !my && !sx && !sy)) return;
     try{
       if(mx||my) ptrWs.send('type:move\ndx:'+mx+'\ndy:'+my+'\n\n');
@@ -992,11 +1175,12 @@ function ensurePtr(cb){
     setTimeout(function(){ pad.classList.remove('tap'); }, 200);
   }
   function doClick(){
+    if(brand==='samsung'){ samsungKey('KEY_ENTER'); flash(); return; }
     if(ptrOk()){ try{ ptrWs.send('type:click\n\n'); flash(); dlog('tap -> click sent'); }catch(e){ ptrReady=false; } }
     else setStatus('Pointer not ready yet — wait a second and retry.', true);
   }
   pad.addEventListener('pointerdown', function(e){
-    ensurePtr(); // re-open the touchpad socket if the TV dropped it while idle
+    if(brand!=='samsung') ensurePtr(); // re-open the touchpad socket if the TV dropped it while idle
     try{ pad.setPointerCapture(e.pointerId); }catch(x){}
     pts[e.pointerId]={x:e.clientX,y:e.clientY};
     var n=Object.keys(pts).length;
@@ -1039,6 +1223,10 @@ function ensurePtr(cb){
 
 // Scroll arrows: tap = one nudge, hold = keep scrolling.
 function scrollBy(dx,dy){
+  if(brand==='samsung'){
+    var sk = Math.abs(dy)>=Math.abs(dx) ? (dy>0?'KEY_UP':'KEY_DOWN') : (dx>0?'KEY_LEFT':'KEY_RIGHT');
+    samsungKey(sk); return;
+  }
   if(!ptrReady || !ptrWs || ptrWs.readyState!==1){
     if(!ptrOpening) setStatus('Pointer not ready yet — wait a second and retry.', true);
     return;
@@ -1073,6 +1261,7 @@ function cmd(uri, payload, label){
 }
 
 function refreshVolume(){
+  if(brand!=='lg') return;
   request('ssap://audio/getVolume').then(function(p){
     if(p && typeof p.volume!=='undefined'){
       $('volVal').textContent='Vol '+p.volume+(p.muted?' (muted)':'');
@@ -1098,13 +1287,13 @@ function disconnect(silent){
   if(!silent){ setPill('Disconnected',''); }
 }
 
-$('connectBtn').addEventListener('click', function(){ connect('PROMPT'); });
+$('connectBtn').addEventListener('click', function(){ if(brand==='samsung') samsungConnect(); else connect('PROMPT'); });
 $('pinBtn').addEventListener('click', function(){ connect('PIN'); });
 $('pinSendBtn').addEventListener('click', sendPin);
 $('ip').addEventListener('keydown', function(e){ if(e.key==='Enter') connect(); });
-$('reconnectBtn').addEventListener('click', function(){ connect(lastType); });
+$('reconnectBtn').addEventListener('click', function(){ if(brand==='samsung') samsungConnect(); else connect(lastType); });
 $('forgetBtn').addEventListener('click', function(){
-  try{ localStorage.removeItem(LS_IP); localStorage.removeItem(LS_KEY); }catch(e){}
+  try{ localStorage.removeItem(LS_IP); localStorage.removeItem(LS_KEY); localStorage.removeItem(LS_TOKEN); }catch(e){}
   $('ip').value=''; disconnect();
   remoteEl.classList.add('hidden'); setupEl.classList.remove('hidden');
   setStatus('Forgot TV. Enter the IP to pair again.');
@@ -1123,27 +1312,29 @@ for(var i=0;i<keyBtns.length;i++){
 }
 var appBtns=document.querySelectorAll('[data-app]');
 for(var j=0;j<appBtns.length;j++){
-  (function(b){ b.addEventListener('click', function(){ cmd('ssap://system.launcher/launch',{id:b.getAttribute('data-app')}, b.textContent); }); })(appBtns[j]);
+  (function(b){ b.addEventListener('click', function(){ var a=b.getAttribute('data-app'); if(brand==='samsung') samsungLaunchApp(a); else cmd('ssap://system.launcher/launch',{id:a}, b.textContent); }); })(appBtns[j]);
 }
 
-$('volUp').addEventListener('click', function(){ cmd('ssap://audio/volumeUp',{},'volume up'); });
-$('volDown').addEventListener('click', function(){ cmd('ssap://audio/volumeDown',{},'volume down'); });
+$('volUp').addEventListener('click', function(){ if(brand==='samsung') samsungKey('KEY_VOLUP'); else cmd('ssap://audio/volumeUp',{},'volume up'); });
+$('volDown').addEventListener('click', function(){ if(brand==='samsung') samsungKey('KEY_VOLDOWN'); else cmd('ssap://audio/volumeDown',{},'volume down'); });
 $('muteBtn').addEventListener('click', function(){
+  if(brand==='samsung'){ samsungKey('KEY_MUTE'); return; }
   request('ssap://audio/getVolume').then(function(p){
     return request('ssap://audio/setMute',{mute:!(p&&p.muted)});
   }).then(function(){ setStatus(''); refreshVolume(); })
   .catch(function(e){ setStatus('Failed: '+e.message, true); });
 });
-$('chUp').addEventListener('click', function(){ cmd('ssap://tv/channelUp',{},'channel up'); });
-$('chDown').addEventListener('click', function(){ cmd('ssap://tv/channelDown',{},'channel down'); });
+$('chUp').addEventListener('click', function(){ if(brand==='samsung') samsungKey('KEY_CHUP'); else cmd('ssap://tv/channelUp',{},'channel up'); });
+$('chDown').addEventListener('click', function(){ if(brand==='samsung') samsungKey('KEY_CHDOWN'); else cmd('ssap://tv/channelDown',{},'channel down'); });
 $('powerBtn').addEventListener('click', function(){
+  if(brand==='samsung'){ if(confirm('Toggle the TV power? If it turns off, no app can turn it back on over the network.')) samsungKey('KEY_POWER'); return; }
   if(confirm('Turn the TV off?')) cmd('ssap://system/turnOff',{},'power off');
 });
-$('play').addEventListener('click', function(){ cmd('ssap://media.controls/play',{},'play'); });
-$('pause').addEventListener('click', function(){ cmd('ssap://media.controls/pause',{},'pause'); });
-$('stop').addEventListener('click', function(){ cmd('ssap://media.controls/stop',{},'stop'); });
-$('rw').addEventListener('click', function(){ cmd('ssap://media.controls/rewind',{},'rewind'); });
-$('ff').addEventListener('click', function(){ cmd('ssap://media.controls/fastForward',{},'fast forward'); });
+$('play').addEventListener('click', function(){ if(brand==='samsung') samsungKey('KEY_PLAY'); else cmd('ssap://media.controls/play',{},'play'); });
+$('pause').addEventListener('click', function(){ if(brand==='samsung') samsungKey('KEY_PAUSE'); else cmd('ssap://media.controls/pause',{},'pause'); });
+$('stop').addEventListener('click', function(){ if(brand==='samsung') samsungKey('KEY_STOP'); else cmd('ssap://media.controls/stop',{},'stop'); });
+$('rw').addEventListener('click', function(){ if(brand==='samsung') samsungKey('KEY_REWIND'); else cmd('ssap://media.controls/rewind',{},'rewind'); });
+$('ff').addEventListener('click', function(){ if(brand==='samsung') samsungKey('KEY_FF'); else cmd('ssap://media.controls/fastForward',{},'fast forward'); });
 
 // prefill saved IP (a ?tv=1.2.3.4 share link overrides the saved one)
 try{
@@ -1154,9 +1345,10 @@ try{
 }catch(e){}
 // auto-validate the certificate on load when an IP is known
 try{
+  setBrand(brand, true);
   var curIp=$('ip').value.trim();
   if(curIp){
-    if(localStorage.getItem(LS_CERT)===curIp)
+    if(certOkFor(curIp))
       setCertStatus('Certificate: trusted at last check — validating again…', null);
     validateCert(true);
   }
