@@ -96,6 +96,7 @@
       <button class="btn primary" id="findBtn">🔍 Find my TV</button>
     </div>
     <p class="hint" id="findStatus"></p>
+    <div id="findResults" style="display:flex;flex-direction:column;gap:8px;"></div>
     <p>Or enter the IP manually (on the TV: <b>Settings → Network → Wi-Fi Connection → Advanced → IP address</b>):</p>
     <div class="row">
       <input type="text" id="ip" inputmode="decimal" placeholder="192.168.1.___" autocomplete="off">
@@ -235,7 +236,7 @@
 <script>
 (function(){
 "use strict";
-var APP_VER='v28';
+var APP_VER='v29';
 // Cache the page for offline loads: iOS pauses a-Shell in the background,
 // which also stops its file server. The service worker serves the cached
 // page so it still opens; the relay is only needed as a fallback.
@@ -470,46 +471,75 @@ $('certOpenBtn').addEventListener('click', function(){
 
 // Find my TV: automatic discovery on the local network, so a changed DHCP IP
 // doesn't matter. A page can't do ping/mDNS scans, so this probes the TV's
-// known secure port (https://<ip>:3001) across the subnet and reads the
-// *timing* of each failure: nothing there = the probe hangs to its timeout;
-// a live host with the port closed = instant reset; a TLS server (the TV)
-// takes measurably longer because the browser starts a handshake, receives
-// the certificate, and only then aborts. Candidates in that middle window
-// get re-probed to confirm before being called the TV.
-function probeTLS(ip, timeoutMs){
+// secure port (https://<ip>:3001) across the subnet and reads the *timing* of
+// each failure: nothing there = the probe hangs to its timeout; a live host
+// with the port closed = near-instant reset; a TLS server (the TV) is slower
+// because the browser starts a handshake and receives the certificate before
+// aborting. Raw timing alone is noisy on Wi-Fi, so a candidate must also:
+//   - beat an adaptive baseline (the subnet's own fast-response cluster), and
+//   - show a per-host delta: port 3001 much slower than a closed control
+//     port (3002) on the SAME host, which cancels out Wi-Fi jitter, and
+//   - ideally open a real wss socket (only possible when its certificate was
+//     accepted before) -- that is conclusive.
+// IPs the user rejects with "Not my TV" are remembered and skipped.
+var LS_NOTTV='webos_not_tv';
+function getNotTv(){ try{ return JSON.parse(localStorage.getItem(LS_NOTTV)||'[]'); }catch(e){ return []; } }
+function addNotTv(ip){ var a=getNotTv(); if(a.indexOf(ip)<0){ a.push(ip); try{ localStorage.setItem(LS_NOTTV, JSON.stringify(a)); }catch(e){} } }
+function probePort(ip, port, timeoutMs){
   return new Promise(function(resolve){
     var t0=performance.now(), settled=false;
     var ctrl=('AbortController' in window)?new AbortController():null;
     function finish(){ if(settled) return; settled=true; clearTimeout(to); resolve({ip:ip, ms:performance.now()-t0}); }
     var to=setTimeout(function(){ if(ctrl){ try{ctrl.abort();}catch(e){} } finish(); }, timeoutMs);
-    fetch('https://'+ip+':3001/', {mode:'no-cors', cache:'no-store', signal:ctrl?ctrl.signal:undefined})
-      .then(finish).catch(finish); // outcome doesn't matter; the elapsed time is the signal
+    fetch('https://'+ip+':'+port+'/', {mode:'no-cors', cache:'no-store', signal:ctrl?ctrl.signal:undefined})
+      .then(finish).catch(finish); // the outcome doesn't matter; elapsed time is the signal
   });
 }
-function isTlsLike(ms){ return ms>=15 && ms<=700; }
-function confirmTV(ip){
-  return Promise.all([probeTLS(ip,1000), probeTLS(ip,1000), probeTLS(ip,1000)]).then(function(rs){
-    return rs.filter(function(r){ return isTlsLike(r.ms); }).length>=2;
+function probeTLS(ip, timeoutMs){ return probePort(ip, 3001, timeoutMs); }
+function medianOf(nums){
+  var a=nums.slice().sort(function(x,y){ return x-y; });
+  return a.length?a[Math.floor(a.length/2)]:0;
+}
+function trySockOpen(ip){ // conclusive when it works: cert already trusted + a real webOS socket answers
+  return new Promise(function(resolve){
+    var done=false, s=null;
+    var to=setTimeout(function(){ finish(false); }, 3500);
+    function finish(ok){ if(done) return; done=true; clearTimeout(to); try{ if(s) s.close(); }catch(e){} resolve(ok); }
+    try{ s=new Sock('wss://'+ip+':3001/'); }catch(e){ finish(false); return; }
+    s.onopen=function(){ finish(true); };
+    s.onclose=function(){ finish(false); };
+    s.onerror=function(){};
+  });
+}
+function confirmTV(ip){ // per-host delta: 3001 (TLS) vs 3002 (closed) on the same host
+  return Promise.all([probeTLS(ip,1000), probeTLS(ip,1000), probeTLS(ip,1000),
+                      probePort(ip,3002,1000), probePort(ip,3002,1000)]).then(function(rs){
+    var mTls=medianOf([rs[0].ms, rs[1].ms, rs[2].ms]);
+    var mCtl=medianOf([rs[3].ms, rs[4].ms]);
+    dlog('confirm '+ip+': tls='+Math.round(mTls)+'ms ctl='+Math.round(mCtl)+'ms');
+    return (mTls>=40 && (mTls-mCtl)>=25) ? {ip:ip, score:mTls-mCtl} : null;
   });
 }
 var scanning=false, scanStop=false;
-function scanSubnet(sub){
+function scanSubnet(sub, skip){
   return new Promise(function(resolve){
-    var checked=0, next=1, active=0, candidates=[];
+    var checked=0, next=1, active=0, results=[];
     function pump(){
-      if(scanStop){ resolve(candidates); return; }
+      if(scanStop){ resolve(results); return; }
       while(active<20 && next<=254){
-        (function(ip){
+        (function(n){
+          var ip=sub+'.'+n;
+          if(skip.indexOf(ip)>=0){ checked++; return; }
           active++;
           probeTLS(ip,1000).then(function(r){
             active--; checked++;
             if(scanning) $('findStatus').textContent='Scanning '+sub+'.0/24… '+checked+'/254';
-            if(isTlsLike(r.ms)) candidates.push(ip);
+            results.push(r);
             pump();
           });
-        })(sub+'.'+(next++));
+        })(next++);
       }
-      if(next>254 && active===0) resolve(candidates);
+      if(next>254 && active===0) resolve(results);
     }
     pump();
   });
@@ -538,39 +568,87 @@ function guessSubnets(cb){
     setTimeout(function(){ try{pc.close();}catch(x){} finish(); }, 1500);
   }catch(e){ finish(); }
 }
-function onTvFound(ip){
+function clearFindUI(){ $('findResults').innerHTML=''; }
+function showNotTv(ip){
+  clearFindUI();
+  var b=document.createElement('button');
+  b.className='btn small'; b.textContent='✗ Not my TV — keep looking';
+  b.addEventListener('click', function(){
+    addNotTv(ip); clearFindUI();
+    $('findStatus').textContent='Got it — excluding '+ip+' and scanning again…';
+    findTv();
+  });
+  $('findResults').appendChild(b);
+}
+function onTvFound(ip, sure){
   $('ip').value=ip;
   try{ localStorage.setItem(LS_IP, ip); }catch(e){}
-  $('findStatus').textContent='✓ Found your TV at '+ip+'.';
-  setStatus('Found your TV at '+ip+'. Now check the certificate below, then Connect.');
-  dlog('find: TV at '+ip);
+  $('findStatus').textContent=(sure?'✓ Found your TV at ':'Possible TV at ')+ip+'.';
+  setStatus('TV at '+ip+'. Now check the certificate below, then Connect.');
+  dlog('find: TV at '+ip+(sure?' (verified)':' (timing match)'));
+  showNotTv(ip);
   validateCert(true); // refresh the certificate line for the (possibly new) IP
+}
+function showCandidates(list){
+  clearFindUI();
+  $('findStatus').textContent='More than one device looks TV-like. Tap the one that is your TV:';
+  list.forEach(function(c){
+    var b=document.createElement('button');
+    b.className='btn small'; b.textContent='📺 '+c.ip;
+    b.addEventListener('click', function(){ onTvFound(c.ip, false); });
+    $('findResults').appendChild(b);
+  });
+  var none=document.createElement('button');
+  none.className='btn small'; none.textContent='None of these — keep looking';
+  none.addEventListener('click', function(){
+    list.forEach(function(c){ addNotTv(c.ip); });
+    clearFindUI(); findTv();
+  });
+  $('findResults').appendChild(none);
 }
 function findTv(){
   var btn=$('findBtn');
   if(scanning){ scanStop=true; return; }
   scanning=true; scanStop=false;
   btn.textContent='⏹ Stop scan';
-  setStatus('');
+  setStatus(''); clearFindUI();
   $('findStatus').textContent='Looking for your TV…';
+  var skip=getNotTv();
   guessSubnets(function(subs){
     (function nextSub(i){
       if(scanStop || i>=subs.length){
         scanning=false; btn.textContent='🔍 Find my TV';
-        $('findStatus').textContent=scanStop?'Scan stopped.':'No TV found. Make sure the TV is on and the phone is on the same Wi-Fi — or enter the IP manually.';
+        if(!scanStop) $('findStatus').textContent='No TV found. Make sure the TV is on and the phone is on the same Wi-Fi — or enter the IP manually.';
+        else $('findStatus').textContent='Scan stopped.';
         return;
       }
-      scanSubnet(subs[i]).then(function(cands){
-        cands=cands.slice(0,6);
-        (function nextCand(j){
+      scanSubnet(subs[i], skip).then(function(results){
+        if(scanStop){ nextSub(subs.length); return; }
+        var fast=results.filter(function(r){ return r.ms<700; }).map(function(r){ return r.ms; });
+        var baseline=fast.length?medianOf(fast):10;
+        var cutoff=Math.max(40, baseline+35);
+        var cands=results.filter(function(r){ return r.ms>=cutoff && r.ms<=700; })
+                         .sort(function(a,b){ return b.ms-a.ms; })
+                         .map(function(r){ return r.ip; })
+                         .slice(0,6);
+        dlog('scan '+subs[i]+': baseline='+Math.round(baseline)+'ms cutoff='+Math.round(cutoff)+'ms candidates='+cands.length);
+        (function nextCand(j, likely){
           if(scanStop){ nextSub(subs.length); return; }
-          if(j>=cands.length){ nextSub(i+1); return; }
+          if(j>=cands.length){
+            if(likely.length===1){ scanning=false; btn.textContent='🔍 Find my TV'; onTvFound(likely[0].ip, false); }
+            else if(likely.length>1){ scanning=false; btn.textContent='🔍 Find my TV'; showCandidates(likely); }
+            else nextSub(i+1);
+            return;
+          }
           $('findStatus').textContent='Checking a possible TV at '+cands[j]+'…';
-          confirmTV(cands[j]).then(function(isTv){
-            if(isTv){ scanning=false; btn.textContent='🔍 Find my TV'; onTvFound(cands[j]); return; }
-            nextCand(j+1);
+          trySockOpen(cands[j]).then(function(open){
+            if(open){ scanning=false; btn.textContent='🔍 Find my TV'; onTvFound(cands[j], true); return; }
+            confirmTV(cands[j]).then(function(hit){
+              if(hit) likely.push(hit);
+              nextCand(j+1, likely);
+            });
           });
-        })(0);
+        })(0, []);
       });
     })(0);
   });
