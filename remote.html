@@ -94,9 +94,10 @@
     <div class="row">
       <button class="btn small primary" id="brandLg">LG webOS</button>
       <button class="btn small" id="brandSamsung">Samsung</button>
+      <button class="btn small" id="brandRoku">Roku</button>
     </div>
     <div style="height:10px"></div>
-    <p>Tap <b>Find my TV</b> — the page scans your Wi-Fi and locates the TV on its own, even if its IP changed, and detects whether it's LG or Samsung. Your phone must be on the same Wi-Fi as the TV, and the TV must be on.</p>
+    <p>Tap <b>Find my TV</b> — the page scans your Wi-Fi and locates the TV on its own, even if its IP changed, and detects whether it's LG, Samsung or Roku. Your phone must be on the same Wi-Fi as the TV, and the TV must be on.</p>
     <div class="row">
       <button class="btn primary" id="findBtn">🔍 Find my TV</button>
     </div>
@@ -120,6 +121,7 @@
         <button class="btn primary" id="pinSendBtn">Send</button>
       </div>
     </div>
+    <div id="certSection">
     <div style="height:14px"></div>
     <h2>Certificate</h2>
     <p class="hint">The TV uses a self-signed certificate, and the browser decides whether to trust it — a web page can't switch that off. What this page can do is <b>validate</b> it: the check below tries the TV's secure handshake. If it completes, the certificate is trusted and Connect will work. If not, accept the certificate once in Safari and validate again.</p>
@@ -128,6 +130,7 @@
       <button class="btn small" id="certOpenBtn">Accept certificate…</button>
     </div>
     <p class="hint" id="certStatus">Certificate: not checked yet.</p>
+    </div>
     <p class="hint" id="setupHint">First time: the TV should show a pairing prompt — accept it with your normal remote. If that fails, use PIN pairing.<br><br>The page connects to the TV directly (no extra software needed). If the direct route ever fails it falls back to a local relay — for that, run <code>python3 relay.py</code> in a-Shell, which also serves this page over your Wi-Fi.</p>
   </div>
 
@@ -241,7 +244,7 @@
 <script>
 (function(){
 "use strict";
-var APP_VER='v30';
+var APP_VER='v31';
 // Cache the page for offline loads: iOS pauses a-Shell in the background,
 // which also stops its file server. The service worker serves the cached
 // page so it still opens; the relay is only needed as a fallback.
@@ -445,6 +448,7 @@ function setCertStatus(txt, state){
   el.style.color = state===true ? 'var(--ok)' : (state===false ? '#fda4af' : '');
 }
 function validateCert(auto){
+  if(brand==='roku') return; // Roku ECP is plain HTTP: there is no certificate
   var ip=$('ip').value.trim();
   if(!ip){ if(!auto) setCertStatus('Enter the TV\'s IP address above first.', false); return; }
   if(brand==='samsung' && auto){
@@ -499,7 +503,7 @@ $('certOpenBtn').addEventListener('click', function(){
 // touchpad sends arrow keys and the keyboard card is hidden for this brand.
 var LS_TOKEN='samsung_token', LS_BRAND='tv_brand';
 var brand='lg';
-try{ var sb0=localStorage.getItem(LS_BRAND); if(sb0==='samsung'||sb0==='lg') brand=sb0; }catch(e){}
+try{ var sb0=localStorage.getItem(LS_BRAND); if(sb0==='samsung'||sb0==='lg'||sb0==='roku') brand=sb0; }catch(e){}
 var SKEY={UP:'KEY_UP',DOWN:'KEY_DOWN',LEFT:'KEY_LEFT',RIGHT:'KEY_RIGHT',ENTER:'KEY_ENTER',BACK:'KEY_RETURN',HOME:'KEY_HOME',EXIT:'KEY_EXIT'};
 function samsungUrl(ip){
   var tok=null; try{ tok=localStorage.getItem(LS_TOKEN); }catch(e){}
@@ -596,24 +600,93 @@ function samsungLaunchApp(nameKey){
   }).catch(function(){ samsungLaunch(fallback); setStatus(''); });
 }
 function applyBrandUI(){
-  var sam = brand==='samsung';
-  $('kbCard').classList.toggle('hidden', sam);
-  $('padHint').innerHTML = sam ? 'Drag = arrow keys &middot; tap = OK<br>Two fingers = scroll keys'
-                               : 'Drag to move the cursor<br>Tap to click &middot; two fingers to scroll';
-  $('pinBtn').classList.toggle('hidden', sam);
-  $('powerBtn').textContent = sam ? '⏻ Power' : '⏻ Power off';
-  if(sam) $('volVal').textContent='';
+  $('kbCard').classList.toggle('hidden', brand==='samsung');
+  $('padHint').innerHTML = brand==='lg' ? 'Drag to move the cursor<br>Tap to click &middot; two fingers to scroll'
+                                        : 'Drag = arrow keys &middot; tap = OK<br>Two fingers = scroll keys';
+  $('pinBtn').classList.toggle('hidden', brand!=='lg');
+  $('certSection').classList.toggle('hidden', brand==='roku');
+  $('powerBtn').textContent = brand==='lg' ? '⏻ Power off' : '⏻ Power';
+  if(brand!=='lg') $('volVal').textContent='';
 }
 function setBrand(b, skipValidate){
   brand=b;
   try{ localStorage.setItem(LS_BRAND, b); }catch(e){}
   $('brandLg').classList.toggle('primary', b==='lg');
   $('brandSamsung').classList.toggle('primary', b==='samsung');
+  $('brandRoku').classList.toggle('primary', b==='roku');
   applyBrandUI();
+  if(b==='roku' && location.protocol==='https:'){
+    setStatus('Roku note: Safari blocks HTTPS pages from reaching a Roku — its API is plain HTTP and has no secure version. Roku control works from the local copy of this page: run relay.py in a-Shell, then open http://127.0.0.1:8000/remote.html', true);
+  }
   if(!skipValidate) validateCert(true);
 }
 $('brandLg').addEventListener('click', function(){ setBrand('lg'); });
 $('brandSamsung').addEventListener('click', function(){ setBrand('samsung'); });
+$('brandRoku').addEventListener('click', function(){ setBrand('roku'); });
+
+// ---------- Roku (ECP) driver ----------
+// Roku TVs expose ECP on http://<ip>:8060 -- plain HTTP, no TLS, no pairing,
+// no certificate. Commands are fire-and-forget POSTs (keypress / launch);
+// the keyboard sends one Lit_<char> per character, so real text entry works.
+// Because the API has no HTTPS form, Safari only lets this page reach it
+// when the page itself was loaded over HTTP (the local copy served by
+// relay.py at http://127.0.0.1:8000/remote.html) -- from an HTTPS page every
+// request to the TV is blocked as mixed content, with no way around it.
+// One TV-side setting matters: Settings -> System -> Advanced system
+// settings -> Control by mobile apps must be Enabled, or keypresses 403.
+var RKEY={UP:'Up',DOWN:'Down',LEFT:'Left',RIGHT:'Right',ENTER:'Select',BACK:'Back',HOME:'Home',EXIT:'Home'};
+function rokuBase(){ return 'http://'+$('ip').value.trim()+':8060'; }
+function rokuFetch(path, method, timeoutMs){
+  var ctrl=('AbortController' in window)?new AbortController():null;
+  var to=setTimeout(function(){ if(ctrl){ try{ctrl.abort();}catch(e){} } }, timeoutMs||5000);
+  return fetch(rokuBase()+path, {method:method||'POST', mode:'no-cors', cache:'no-store', signal:ctrl?ctrl.signal:undefined})
+    .then(function(){ clearTimeout(to); return true; })
+    .catch(function(e){ clearTimeout(to); throw e; });
+}
+function rokuPost(path){ return rokuFetch(path, 'POST', 5000); }
+function rokuKey(k){
+  rokuPost('/keypress/'+k).then(function(){ setStatus(''); })
+    .catch(function(){ setStatus('Roku did not answer. Check: TV on, same Wi-Fi, and Settings → System → Advanced system settings → Control by mobile apps = Enabled.', true); });
+}
+function brandKey(name){ // D-pad-style key for the non-LG brands
+  if(brand==='samsung') samsungKey(SKEY[name]||('KEY_'+name));
+  else if(brand==='roku') rokuKey(RKEY[name]||name);
+}
+function brandAction(kind){ // volume / channel / media one-offs for non-LG brands
+  var S={volUp:'KEY_VOLUP',volDown:'KEY_VOLDOWN',mute:'KEY_MUTE',chUp:'KEY_CHUP',chDown:'KEY_CHDOWN',play:'KEY_PLAY',pause:'KEY_PAUSE',stop:'KEY_STOP',rw:'KEY_REWIND',ff:'KEY_FF'};
+  var R={volUp:'VolumeUp',volDown:'VolumeDown',mute:'VolumeMute',chUp:'ChannelUp',chDown:'ChannelDown',play:'Play',pause:'Play',stop:'Back',rw:'Rev',ff:'Fwd'};
+  if(brand==='samsung') samsungKey(S[kind]);
+  else if(brand==='roku') rokuKey(R[kind]);
+}
+function brandLaunchApp(nameKey){
+  if(brand==='samsung'){ samsungLaunchApp(nameKey); return; }
+  if(brand==='roku'){
+    var id={netflix:'12', youtube:'837', amazon:'13'}[nameKey];
+    setStatus('Launching…');
+    rokuPost('/launch/'+id).then(function(){ setStatus(''); })
+      .catch(function(){ setStatus('Roku did not answer — is it on?', true); });
+  }
+}
+function rokuConnect(){
+  var ip=$('ip').value.trim();
+  if(!ip){ setStatus('Enter the TV\'s IP address first.', true); return; }
+  try{ localStorage.setItem(LS_IP, ip); }catch(e){}
+  if(location.protocol==='https:'){
+    setStatus('This is the HTTPS copy of the page — Safari blocks every Roku command from here, because Roku\'s API is plain HTTP only. Open the local copy instead: run relay.py in a-Shell, then open http://127.0.0.1:8000/remote.html and connect from there.', true);
+    return;
+  }
+  setBusy(true); setPill('Connecting…','busy');
+  rokuFetch('/query/device-info', 'GET', 6000).then(function(){
+    isConnected=true; viaRelay=false;
+    setBusy(false); setPill('Connected','on'); setStatus('');
+    setupEl.classList.add('hidden'); remoteEl.classList.remove('hidden');
+    applyBrandUI();
+    dlog('roku connected (ECP answered)');
+  }).catch(function(){
+    setBusy(false); setPill('Failed','');
+    setStatus('No answer from a Roku at '+ip+'. Check the TV is on, on the same Wi-Fi, and Control by mobile apps is Enabled (Settings → System → Advanced system settings).', true);
+  });
+}
 
 // Find my TV: automatic discovery on the local network, so a changed DHCP IP
 // doesn't matter. A page can't do ping/mDNS scans, so this probes the brands'
@@ -643,6 +716,16 @@ function probePort(ip, port, timeoutMs){
   });
 }
 function probeTLS(ip, timeoutMs){ return probePort(ip, 3001, timeoutMs); }
+function probeHttp(ip, port, timeoutMs){ // Roku: fetch resolves only if an HTTP server actually answered on 8060
+  return new Promise(function(resolve){
+    var settled=false;
+    var ctrl=('AbortController' in window)?new AbortController():null;
+    function finish(hit){ if(settled) return; settled=true; clearTimeout(to); resolve({ip:ip, port:port, ms:hit?500:0, hit:hit}); }
+    var to=setTimeout(function(){ if(ctrl){ try{ctrl.abort();}catch(e){} } finish(false); }, timeoutMs);
+    fetch('http://'+ip+':'+port+'/query/device-info', {mode:'no-cors', cache:'no-store', signal:ctrl?ctrl.signal:undefined})
+      .then(function(){ finish(true); }).catch(function(){ finish(false); });
+  });
+}
 function medianOf(nums){
   var a=nums.slice().sort(function(x,y){ return x-y; });
   return a.length?a[Math.floor(a.length/2)]:0;
@@ -692,10 +775,13 @@ function scanSubnet(sub, skip){
           var ip=sub+'.'+n;
           if(skip.indexOf(ip)>=0){ checked++; return; }
           active++;
-          Promise.all([probePort(ip,3001,1000), probePort(ip,8002,1000)]).then(function(rs){
+          var probes=[probePort(ip,3001,1000), probePort(ip,8002,1000)];
+          if(location.protocol==='http:') probes.push(probeHttp(ip,8060,1000)); // Roku is HTTP-only; from an HTTPS page these are blocked before they start
+          Promise.all(probes).then(function(rs){
             active--; checked++;
             if(scanning) $('findStatus').textContent='Scanning '+sub+'.0/24… '+checked+'/254';
             results.push(rs[0]); results.push(rs[1]);
+            if(rs[2] && rs[2].hit) results.push(rs[2]);
             pump();
           });
         })(next++);
@@ -741,13 +827,13 @@ function showNotTv(ip){
   });
   $('findResults').appendChild(b);
 }
-function brandName(b){ return b==='samsung'?'Samsung':'LG webOS'; }
+function brandName(b){ return b==='samsung'?'Samsung':(b==='roku'?'Roku':'LG webOS'); }
 function onTvFound(ip, sure, foundBrand){
   if(foundBrand) setBrand(foundBrand, true);
   $('ip').value=ip;
   try{ localStorage.setItem(LS_IP, ip); }catch(e){}
   $('findStatus').textContent=(sure?'✓ Found your ':'Possible ')+brandName(brand)+' TV at '+ip+'.';
-  setStatus('TV at '+ip+' ('+brandName(brand)+'). Now check the certificate below, then Connect.');
+  setStatus(brand==='roku' ? ('Roku at '+ip+'. Tap Connect.') : ('TV at '+ip+' ('+brandName(brand)+'). Now check the certificate below, then Connect.'));
   dlog('find: '+brand+' TV at '+ip+(sure?' (verified)':' (timing match)'));
   showNotTv(ip);
   validateCert(true); // refresh the certificate line for the (possibly new) IP and brand
@@ -799,6 +885,8 @@ function findTv(){
             .forEach(function(r){ cands.push({ip:r.ip, brand:pb[1], ms:r.ms}); });
           dlog('scan '+subs[i]+' port '+pb[0]+': baseline='+Math.round(baseline)+'ms cutoff='+Math.round(cutoff)+'ms');
         });
+        results.filter(function(r){ return r.port===8060 && r.hit; })
+               .forEach(function(r){ cands.push({ip:r.ip, brand:'roku', ms:600}); });
         cands.sort(function(a,b){ return b.ms-a.ms; });
         cands=cands.slice(0,6);
         (function nextCand(j, likely){
@@ -811,6 +899,13 @@ function findTv(){
           }
           var c=cands[j];
           $('findStatus').textContent='Checking a possible TV at '+c.ip+'…';
+          if(c.brand==='roku'){
+            probeHttp(c.ip, 8060, 1200).then(function(r){
+              if(r.hit){ scanning=false; btn.textContent='🔍 Find my TV'; onTvFound(c.ip, true, 'roku'); return; }
+              nextCand(j+1, likely);
+            });
+            return;
+          }
           var openTest = c.brand==='samsung' ? trySamsungOpen(c.ip) : trySockOpen(c.ip);
           openTest.then(function(open){
             if(open){ scanning=false; btn.textContent='🔍 Find my TV'; onTvFound(c.ip, true, c.brand); return; }
@@ -1060,7 +1155,7 @@ function stopHeartbeat(){ if(hbTimer){ clearInterval(hbTimer); hbTimer=null; } a
 // Home: this TV's firmware ignores pointer-socket button presses, so find the
 // home/launcher app on the TV itself and launch it instead of guessing the ID.
 function goHome(){
-  if(brand==='samsung'){ samsungKey('KEY_HOME'); return; }
+  if(brand!=='lg'){ brandKey('HOME'); return; }
   press('HOME');
   request('ssap://com.webos.applicationManager/listApps').then(function(r){
     var apps=(r && r.apps)||[], home=null, i, id;
@@ -1081,7 +1176,7 @@ function goHome(){
 }
 // Exit: close whatever app is in the foreground (the closest SSAP to EXIT).
 function goExit(){
-  if(brand==='samsung'){ samsungKey('KEY_EXIT'); return; }
+  if(brand!=='lg'){ brandKey('EXIT'); return; }
   press('EXIT');
   request('ssap://com.webos.applicationManager/getForegroundAppInfo').then(function(r){
     var appId=r && r.appId;
@@ -1092,7 +1187,7 @@ function goExit(){
 }
 function ptrOk(){ return ptrReady && ptrWs && ptrWs.readyState===1; }
 function press(name){
-  if(brand==='samsung'){ samsungKey(SKEY[name]||('KEY_'+name)); return; }
+  if(brand!=='lg'){ brandKey(name); return; }
   ensurePtr(function(ok){
     if(!ok || !ptrOk()){ setStatus('Pointer not ready yet — wait a second and retry.', true); dlog(name+': pointer not ready'); return; }
     try{ ptrWs.send('type:button\nname:'+name+'\n\n'); setStatus(''); dlog(name+' -> button sent'); }
@@ -1151,12 +1246,12 @@ function ensurePtr(cb){
     var mx=Math.round(accX*SENS), my=Math.round(accY*SENS);
     var sx=Math.round(accSX*SSENS), sy=Math.round(accSY*SSENS);
     accX=0; accY=0; accSX=0; accSY=0;
-    if(brand==='samsung'){
+    if(brand!=='lg'){
       var kx=Math.max(-3,Math.min(3,Math.round(mx/70))), ky=Math.max(-3,Math.min(3,Math.round(my/70)));
-      while(kx>0){ samsungKey('KEY_RIGHT'); kx--; } while(kx<0){ samsungKey('KEY_LEFT'); kx++; }
-      while(ky>0){ samsungKey('KEY_DOWN'); ky--; } while(ky<0){ samsungKey('KEY_UP'); ky++; }
-      if(sy<=-40) samsungKey('KEY_DOWN'); else if(sy>=40) samsungKey('KEY_UP');
-      if(sx<=-40) samsungKey('KEY_RIGHT'); else if(sx>=40) samsungKey('KEY_LEFT');
+      while(kx>0){ brandKey('RIGHT'); kx--; } while(kx<0){ brandKey('LEFT'); kx++; }
+      while(ky>0){ brandKey('DOWN'); ky--; } while(ky<0){ brandKey('UP'); ky++; }
+      if(sy<=-40) brandKey('DOWN'); else if(sy>=40) brandKey('UP');
+      if(sx<=-40) brandKey('RIGHT'); else if(sx>=40) brandKey('LEFT');
       return;
     }
     if(!ptrOk() || (!mx && !my && !sx && !sy)) return;
@@ -1175,12 +1270,12 @@ function ensurePtr(cb){
     setTimeout(function(){ pad.classList.remove('tap'); }, 200);
   }
   function doClick(){
-    if(brand==='samsung'){ samsungKey('KEY_ENTER'); flash(); return; }
+    if(brand!=='lg'){ brandKey('ENTER'); flash(); return; }
     if(ptrOk()){ try{ ptrWs.send('type:click\n\n'); flash(); dlog('tap -> click sent'); }catch(e){ ptrReady=false; } }
     else setStatus('Pointer not ready yet — wait a second and retry.', true);
   }
   pad.addEventListener('pointerdown', function(e){
-    if(brand!=='samsung') ensurePtr(); // re-open the touchpad socket if the TV dropped it while idle
+    if(brand==='lg') ensurePtr(); // re-open the touchpad socket if the TV dropped it while idle
     try{ pad.setPointerCapture(e.pointerId); }catch(x){}
     pts[e.pointerId]={x:e.clientX,y:e.clientY};
     var n=Object.keys(pts).length;
@@ -1223,9 +1318,9 @@ function ensurePtr(cb){
 
 // Scroll arrows: tap = one nudge, hold = keep scrolling.
 function scrollBy(dx,dy){
-  if(brand==='samsung'){
-    var sk = Math.abs(dy)>=Math.abs(dx) ? (dy>0?'KEY_UP':'KEY_DOWN') : (dx>0?'KEY_LEFT':'KEY_RIGHT');
-    samsungKey(sk); return;
+  if(brand!=='lg'){
+    var gk = Math.abs(dy)>=Math.abs(dx) ? (dy>0?'UP':'DOWN') : (dx>0?'LEFT':'RIGHT');
+    brandKey(gk); return;
   }
   if(!ptrReady || !ptrWs || ptrWs.readyState!==1){
     if(!ptrOpening) setStatus('Pointer not ready yet — wait a second and retry.', true);
@@ -1273,11 +1368,21 @@ function refreshVolume(){
 function kbSend(){
   var t=$('kbInput').value;
   if(!t) return;
+  if(brand==='roku'){
+    $('kbInput').value='';
+    setStatus('Sending text…');
+    var chain=Promise.resolve();
+    t.split('').forEach(function(ch){
+      chain=chain.then(function(){ return rokuPost('/keypress/Lit_'+encodeURIComponent(ch)).catch(function(){ return false; }); });
+    });
+    chain.then(function(){ setStatus(''); });
+    return;
+  }
   cmd('ssap://com.webos.service.ime/insertText', {text:t}, 'text');
   $('kbInput').value='';
 }
-function kbDelete(){ cmd('ssap://com.webos.service.ime/deleteCharacters', {count:1}, 'delete'); }
-function kbEnter(){ cmd('ssap://com.webos.service.ime/sendEnterKey', {}, 'enter'); }
+function kbDelete(){ if(brand==='roku'){ rokuKey('Backspace'); return; } cmd('ssap://com.webos.service.ime/deleteCharacters', {count:1}, 'delete'); }
+function kbEnter(){ if(brand==='roku'){ rokuKey('Enter'); return; } cmd('ssap://com.webos.service.ime/sendEnterKey', {}, 'enter'); }
 
 function disconnect(silent){
   stopHeartbeat();
@@ -1287,11 +1392,11 @@ function disconnect(silent){
   if(!silent){ setPill('Disconnected',''); }
 }
 
-$('connectBtn').addEventListener('click', function(){ if(brand==='samsung') samsungConnect(); else connect('PROMPT'); });
+$('connectBtn').addEventListener('click', function(){ if(brand==='samsung') samsungConnect(); else if(brand==='roku') rokuConnect(); else connect('PROMPT'); });
 $('pinBtn').addEventListener('click', function(){ connect('PIN'); });
 $('pinSendBtn').addEventListener('click', sendPin);
 $('ip').addEventListener('keydown', function(e){ if(e.key==='Enter') connect(); });
-$('reconnectBtn').addEventListener('click', function(){ if(brand==='samsung') samsungConnect(); else connect(lastType); });
+$('reconnectBtn').addEventListener('click', function(){ if(brand==='samsung') samsungConnect(); else if(brand==='roku') rokuConnect(); else connect(lastType); });
 $('forgetBtn').addEventListener('click', function(){
   try{ localStorage.removeItem(LS_IP); localStorage.removeItem(LS_KEY); localStorage.removeItem(LS_TOKEN); }catch(e){}
   $('ip').value=''; disconnect();
@@ -1312,29 +1417,30 @@ for(var i=0;i<keyBtns.length;i++){
 }
 var appBtns=document.querySelectorAll('[data-app]');
 for(var j=0;j<appBtns.length;j++){
-  (function(b){ b.addEventListener('click', function(){ var a=b.getAttribute('data-app'); if(brand==='samsung') samsungLaunchApp(a); else cmd('ssap://system.launcher/launch',{id:a}, b.textContent); }); })(appBtns[j]);
+  (function(b){ b.addEventListener('click', function(){ var a=b.getAttribute('data-app'); if(brand!=='lg') brandLaunchApp(a); else cmd('ssap://system.launcher/launch',{id:a}, b.textContent); }); })(appBtns[j]);
 }
 
-$('volUp').addEventListener('click', function(){ if(brand==='samsung') samsungKey('KEY_VOLUP'); else cmd('ssap://audio/volumeUp',{},'volume up'); });
-$('volDown').addEventListener('click', function(){ if(brand==='samsung') samsungKey('KEY_VOLDOWN'); else cmd('ssap://audio/volumeDown',{},'volume down'); });
+$('volUp').addEventListener('click', function(){ if(brand!=='lg') brandAction('volUp'); else cmd('ssap://audio/volumeUp',{},'volume up'); });
+$('volDown').addEventListener('click', function(){ if(brand!=='lg') brandAction('volDown'); else cmd('ssap://audio/volumeDown',{},'volume down'); });
 $('muteBtn').addEventListener('click', function(){
-  if(brand==='samsung'){ samsungKey('KEY_MUTE'); return; }
+  if(brand!=='lg'){ brandAction('mute'); return; }
   request('ssap://audio/getVolume').then(function(p){
     return request('ssap://audio/setMute',{mute:!(p&&p.muted)});
   }).then(function(){ setStatus(''); refreshVolume(); })
   .catch(function(e){ setStatus('Failed: '+e.message, true); });
 });
-$('chUp').addEventListener('click', function(){ if(brand==='samsung') samsungKey('KEY_CHUP'); else cmd('ssap://tv/channelUp',{},'channel up'); });
-$('chDown').addEventListener('click', function(){ if(brand==='samsung') samsungKey('KEY_CHDOWN'); else cmd('ssap://tv/channelDown',{},'channel down'); });
+$('chUp').addEventListener('click', function(){ if(brand!=='lg') brandAction('chUp'); else cmd('ssap://tv/channelUp',{},'channel up'); });
+$('chDown').addEventListener('click', function(){ if(brand!=='lg') brandAction('chDown'); else cmd('ssap://tv/channelDown',{},'channel down'); });
 $('powerBtn').addEventListener('click', function(){
   if(brand==='samsung'){ if(confirm('Toggle the TV power? If it turns off, no app can turn it back on over the network.')) samsungKey('KEY_POWER'); return; }
+  if(brand==='roku'){ if(confirm('Toggle the TV power? (Power-on over the network needs Fast TV Start enabled on the TV.)')) rokuKey('Power'); return; }
   if(confirm('Turn the TV off?')) cmd('ssap://system/turnOff',{},'power off');
 });
-$('play').addEventListener('click', function(){ if(brand==='samsung') samsungKey('KEY_PLAY'); else cmd('ssap://media.controls/play',{},'play'); });
-$('pause').addEventListener('click', function(){ if(brand==='samsung') samsungKey('KEY_PAUSE'); else cmd('ssap://media.controls/pause',{},'pause'); });
-$('stop').addEventListener('click', function(){ if(brand==='samsung') samsungKey('KEY_STOP'); else cmd('ssap://media.controls/stop',{},'stop'); });
-$('rw').addEventListener('click', function(){ if(brand==='samsung') samsungKey('KEY_REWIND'); else cmd('ssap://media.controls/rewind',{},'rewind'); });
-$('ff').addEventListener('click', function(){ if(brand==='samsung') samsungKey('KEY_FF'); else cmd('ssap://media.controls/fastForward',{},'fast forward'); });
+$('play').addEventListener('click', function(){ if(brand!=='lg') brandAction('play'); else cmd('ssap://media.controls/play',{},'play'); });
+$('pause').addEventListener('click', function(){ if(brand!=='lg') brandAction('pause'); else cmd('ssap://media.controls/pause',{},'pause'); });
+$('stop').addEventListener('click', function(){ if(brand!=='lg') brandAction('stop'); else cmd('ssap://media.controls/stop',{},'stop'); });
+$('rw').addEventListener('click', function(){ if(brand!=='lg') brandAction('rw'); else cmd('ssap://media.controls/rewind',{},'rewind'); });
+$('ff').addEventListener('click', function(){ if(brand!=='lg') brandAction('ff'); else cmd('ssap://media.controls/fastForward',{},'fast forward'); });
 
 // prefill saved IP (a ?tv=1.2.3.4 share link overrides the saved one)
 try{
