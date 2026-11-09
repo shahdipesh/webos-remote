@@ -91,7 +91,12 @@
   <!-- SETUP -->
   <div id="setup" class="card">
     <h2>Connect to your TV</h2>
-    <p>Enter your TV's IP address. Find it on the TV at <b>Settings → Network → Wi-Fi Connection → Advanced → IP address</b>. Your phone must be on the same Wi-Fi.</p>
+    <p>Tap <b>Find my TV</b> — the page scans your Wi-Fi and locates the TV on its own, even if its IP changed. Your phone must be on the same Wi-Fi as the TV, and the TV must be on.</p>
+    <div class="row">
+      <button class="btn primary" id="findBtn">🔍 Find my TV</button>
+    </div>
+    <p class="hint" id="findStatus"></p>
+    <p>Or enter the IP manually (on the TV: <b>Settings → Network → Wi-Fi Connection → Advanced → IP address</b>):</p>
     <div class="row">
       <input type="text" id="ip" inputmode="decimal" placeholder="192.168.1.___" autocomplete="off">
     </div>
@@ -230,7 +235,7 @@
 <script>
 (function(){
 "use strict";
-var APP_VER='v27';
+var APP_VER='v28';
 // Cache the page for offline loads: iOS pauses a-Shell in the background,
 // which also stops its file server. The service worker serves the cached
 // page so it still opens; the relay is only needed as a fallback.
@@ -462,6 +467,115 @@ $('certOpenBtn').addEventListener('click', function(){
   window.open('https://'+ip+':3001', '_blank');
   setCertStatus('Opened the TV\'s certificate page. In Safari tap Show Details → visit this website, then come back and tap Validate certificate.', null);
 });
+
+// Find my TV: automatic discovery on the local network, so a changed DHCP IP
+// doesn't matter. A page can't do ping/mDNS scans, so this probes the TV's
+// known secure port (https://<ip>:3001) across the subnet and reads the
+// *timing* of each failure: nothing there = the probe hangs to its timeout;
+// a live host with the port closed = instant reset; a TLS server (the TV)
+// takes measurably longer because the browser starts a handshake, receives
+// the certificate, and only then aborts. Candidates in that middle window
+// get re-probed to confirm before being called the TV.
+function probeTLS(ip, timeoutMs){
+  return new Promise(function(resolve){
+    var t0=performance.now(), settled=false;
+    var ctrl=('AbortController' in window)?new AbortController():null;
+    function finish(){ if(settled) return; settled=true; clearTimeout(to); resolve({ip:ip, ms:performance.now()-t0}); }
+    var to=setTimeout(function(){ if(ctrl){ try{ctrl.abort();}catch(e){} } finish(); }, timeoutMs);
+    fetch('https://'+ip+':3001/', {mode:'no-cors', cache:'no-store', signal:ctrl?ctrl.signal:undefined})
+      .then(finish).catch(finish); // outcome doesn't matter; the elapsed time is the signal
+  });
+}
+function isTlsLike(ms){ return ms>=15 && ms<=700; }
+function confirmTV(ip){
+  return Promise.all([probeTLS(ip,1000), probeTLS(ip,1000), probeTLS(ip,1000)]).then(function(rs){
+    return rs.filter(function(r){ return isTlsLike(r.ms); }).length>=2;
+  });
+}
+var scanning=false, scanStop=false;
+function scanSubnet(sub){
+  return new Promise(function(resolve){
+    var checked=0, next=1, active=0, candidates=[];
+    function pump(){
+      if(scanStop){ resolve(candidates); return; }
+      while(active<20 && next<=254){
+        (function(ip){
+          active++;
+          probeTLS(ip,1000).then(function(r){
+            active--; checked++;
+            if(scanning) $('findStatus').textContent='Scanning '+sub+'.0/24… '+checked+'/254';
+            if(isTlsLike(r.ms)) candidates.push(ip);
+            pump();
+          });
+        })(sub+'.'+(next++));
+      }
+      if(next>254 && active===0) resolve(candidates);
+    }
+    pump();
+  });
+}
+function guessSubnets(cb){
+  var m=/^(\d+\.\d+\.\d+)\.\d+$/.exec($('ip').value.trim());
+  var fromField=m?m[1]:null, rtcSub=null, done=false;
+  function finish(){
+    if(done) return; done=true;
+    var subs=[];
+    [rtcSub, fromField, '192.168.1', '192.168.0', '10.0.0'].forEach(function(s){
+      if(s && subs.indexOf(s)<0) subs.push(s);
+    });
+    cb(subs);
+  }
+  try{ // WebRTC sometimes reveals the phone's own IP; its subnet goes first
+    var PC=window.RTCPeerConnection||window.webkitRTCPeerConnection;
+    var pc=new PC({iceServers:[]});
+    pc.createDataChannel('x');
+    pc.onicecandidate=function(e){
+      if(!e.candidate){ try{pc.close();}catch(x){} finish(); return; }
+      var mm=/(\d+\.\d+\.\d+)\.\d+\s/.exec((e.candidate.candidate||'')+' ');
+      if(mm && /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(mm[1]+'.')) rtcSub=mm[1];
+    };
+    pc.createOffer().then(function(o){ return pc.setLocalDescription(o); }).catch(function(){ finish(); });
+    setTimeout(function(){ try{pc.close();}catch(x){} finish(); }, 1500);
+  }catch(e){ finish(); }
+}
+function onTvFound(ip){
+  $('ip').value=ip;
+  try{ localStorage.setItem(LS_IP, ip); }catch(e){}
+  $('findStatus').textContent='✓ Found your TV at '+ip+'.';
+  setStatus('Found your TV at '+ip+'. Now check the certificate below, then Connect.');
+  dlog('find: TV at '+ip);
+  validateCert(true); // refresh the certificate line for the (possibly new) IP
+}
+function findTv(){
+  var btn=$('findBtn');
+  if(scanning){ scanStop=true; return; }
+  scanning=true; scanStop=false;
+  btn.textContent='⏹ Stop scan';
+  setStatus('');
+  $('findStatus').textContent='Looking for your TV…';
+  guessSubnets(function(subs){
+    (function nextSub(i){
+      if(scanStop || i>=subs.length){
+        scanning=false; btn.textContent='🔍 Find my TV';
+        $('findStatus').textContent=scanStop?'Scan stopped.':'No TV found. Make sure the TV is on and the phone is on the same Wi-Fi — or enter the IP manually.';
+        return;
+      }
+      scanSubnet(subs[i]).then(function(cands){
+        cands=cands.slice(0,6);
+        (function nextCand(j){
+          if(scanStop){ nextSub(subs.length); return; }
+          if(j>=cands.length){ nextSub(i+1); return; }
+          $('findStatus').textContent='Checking a possible TV at '+cands[j]+'…';
+          confirmTV(cands[j]).then(function(isTv){
+            if(isTv){ scanning=false; btn.textContent='🔍 Find my TV'; onTvFound(cands[j]); return; }
+            nextCand(j+1);
+          });
+        })(0);
+      });
+    })(0);
+  });
+}
+$('findBtn').addEventListener('click', findTv);
 
 // Sock: WebSocket-compatible wrapper whose connection is opened from inside a
 // hidden sandboxed iframe (socket.html). The iframe has an opaque origin, so
