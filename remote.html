@@ -78,6 +78,11 @@
   #dbg{font:10px/1.6 monospace;color:var(--dim);text-align:left;white-space:pre-wrap;max-height:150px;overflow:auto;margin-top:6px;}
   .hidden{display:none !important;}
   .hint{font-size:12px;color:var(--dim);line-height:1.6;}
+  #voiceBtn{font-size:18px;padding:16px 10px;}
+  #voiceBtn.listening{background:#be123c;animation:pulse 1.2s ease-in-out infinite;}
+  @keyframes pulse{0%,100%{transform:scale(1);}50%{transform:scale(1.03);}}
+  #voiceStatus{font-size:13px;color:var(--dim);text-align:center;min-height:20px;line-height:1.4;margin-top:10px;}
+  #voiceStatus b{color:var(--text);}
   .hint code{background:var(--btn);padding:2px 6px;border-radius:6px;color:var(--text);font-size:12px;}
 </style>
 </head>
@@ -219,6 +224,13 @@
     </div>
 
     <div class="card">
+      <h2>Voice control</h2>
+      <button class="btn primary" id="voiceBtn">🎙️ Tap to speak</button>
+      <div id="voiceStatus">Try: “volume up”, “mute”, “play”, “home”, “open YouTube”, “turn off”.</div>
+      <p class="hint">Tap the mic, speak one command, and the remote runs it. The page must stay open and you tap each time — it can't listen in the background. Needs microphone permission and internet (the phone does the speech-to-text).</p>
+    </div>
+
+    <div class="card">
       <h2>Apps</h2>
       <div class="apps">
         <button class="btn small" data-app="netflix">Netflix</button>
@@ -244,7 +256,7 @@
 <script>
 (function(){
 "use strict";
-var APP_VER='v32';
+var APP_VER='v33';
 // Cache the page for offline loads: iOS pauses a-Shell in the background,
 // which also stops its file server. The service worker serves the cached
 // page so it still opens; the relay is only needed as a fallback.
@@ -1484,16 +1496,170 @@ $('muteBtn').addEventListener('click', function(){
 });
 $('chUp').addEventListener('click', function(){ if(brand!=='lg') brandAction('chUp'); else cmd('ssap://tv/channelUp',{},'channel up'); });
 $('chDown').addEventListener('click', function(){ if(brand!=='lg') brandAction('chDown'); else cmd('ssap://tv/channelDown',{},'channel down'); });
+function doPowerOff(){
+  if(brand==='samsung'){ samsungKey('KEY_POWER'); return; }
+  if(brand==='roku'){ rokuKey('Power'); return; }
+  cmd('ssap://system/turnOff',{},'power off');
+}
 $('powerBtn').addEventListener('click', function(){
-  if(brand==='samsung'){ if(confirm('Toggle the TV power? If it turns off, no app can turn it back on over the network.')) samsungKey('KEY_POWER'); return; }
-  if(brand==='roku'){ if(confirm('Toggle the TV power? (Power-on over the network needs Fast TV Start enabled on the TV.)')) rokuKey('Power'); return; }
-  if(confirm('Turn the TV off?')) cmd('ssap://system/turnOff',{},'power off');
+  if(brand==='samsung'){ if(confirm('Toggle the TV power? If it turns off, no app can turn it back on over the network.')) doPowerOff(); return; }
+  if(brand==='roku'){ if(confirm('Toggle the TV power? (Power-on over the network needs Fast TV Start enabled on the TV.)')) doPowerOff(); return; }
+  if(confirm('Turn the TV off?')) doPowerOff();
 });
 $('play').addEventListener('click', function(){ if(brand!=='lg') brandAction('play'); else cmd('ssap://media.controls/play',{},'play'); });
 $('pause').addEventListener('click', function(){ if(brand!=='lg') brandAction('pause'); else cmd('ssap://media.controls/pause',{},'pause'); });
 $('stop').addEventListener('click', function(){ if(brand!=='lg') brandAction('stop'); else cmd('ssap://media.controls/stop',{},'stop'); });
 $('rw').addEventListener('click', function(){ if(brand!=='lg') brandAction('rw'); else cmd('ssap://media.controls/rewind',{},'rewind'); });
 $('ff').addEventListener('click', function(){ if(brand!=='lg') brandAction('ff'); else cmd('ssap://media.controls/fastForward',{},'fast forward'); });
+
+// ---------- Voice control (v33) ----------
+// Tap-to-talk only: the browser's SpeechRecognition (webkitSpeechRecognition
+// on iOS Safari 14.5+) turns one spoken phrase into text, then the parser
+// below maps it onto the same button handlers the remote already uses -- so
+// voice works for LG, Samsung and Roku with no new TV protocol and no
+// server. It cannot listen in the background or wake on a word: iOS requires
+// a user tap to start it, and continuous mode is unreliable on Safari, so
+// this is single-shot (one command per tap).
+var SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
+var voiceBtn=$('voiceBtn'), voiceStatusEl=$('voiceStatus');
+var recog=null, listening=false;
+function setVoiceStatus(html){ if(voiceStatusEl) voiceStatusEl.innerHTML=html; }
+function clickEl(el){ if(el) el.click(); }
+function clickApp(name){
+  var b=document.querySelector('[data-app="'+name+'"]');
+  if(b) b.click(); else if(brand!=='lg') brandLaunchApp(name);
+}
+// parseVoice: transcript -> {action, arg} or null. Longer / more specific
+// phrases are checked first so "volume up" doesn't match plain "up", and
+// "channel up" doesn't match "up" either.
+function parseVoice(raw){
+  var t=(' '+String(raw||'').toLowerCase()+' ').replace(/[^a-z0-9 ]/g,' ').replace(/\s+/g,' ').trim();
+  if(!t) return null;
+  t=t.replace(/^(please|hey tv|ok tv|tv)\s+/,'').trim();
+  var m;
+  if((m=/^(type|search)\s+(.+)$/.exec(t))) return {action:'type', arg:m[2].trim()};
+  if(/turn off|power off|switch off|shut down|turn the tv off/.test(t)) return {action:'power'};
+  if((m=/set volume to (\d+)/.exec(t)) || (m=/^volume (\d+)$/.exec(t))) return {action:'volSet', arg:Math.max(0,Math.min(100,parseInt(m[1],10)))};
+  if(/volume up|louder|increase volume|turn it up|turn the volume up/.test(t)) return {action:'volUp'};
+  if(/volume down|quieter|decrease volume|turn it down|turn the volume down/.test(t)) return {action:'volDown'};
+  if(/unmute|mute|silence|sound off/.test(t)) return {action:'mute'};
+  if(/channel up|next channel/.test(t)) return {action:'chUp'};
+  if(/channel down|previous channel|last channel/.test(t)) return {action:'chDown'};
+  if(/open youtube|youtube/.test(t)) return {action:'youtube'};
+  if(/open netflix|netflix/.test(t)) return {action:'netflix'};
+  if(/open prime|amazon prime|prime video|amazon/.test(t)) return {action:'amazon'};
+  if(/fast forward|forward/.test(t)) return {action:'ff'};
+  if(/rewind/.test(t)) return {action:'rw'};
+  if(/scroll up/.test(t)) return {action:'scrollUp'};
+  if(/scroll down/.test(t)) return {action:'scrollDown'};
+  if(/go home|^home$|home screen/.test(t)) return {action:'home'};
+  if(/go back|^back$/.test(t)) return {action:'back'};
+  if(/^exit$|close app/.test(t)) return {action:'exit'};
+  if(/^(play|resume)$/.test(t)) return {action:'play'};
+  if(/^pause$/.test(t)) return {action:'pause'};
+  if(/^stop$/.test(t)) return {action:'stop'};
+  if(/\bup\b/.test(t)) return {action:'up'};
+  if(/\bdown\b/.test(t)) return {action:'down'};
+  if(/\bleft\b/.test(t)) return {action:'left'};
+  if(/\bright\b/.test(t)) return {action:'right'};
+  if(/\bclick\b|\btap\b/.test(t)) return {action:'click'};
+  if(/\bok\b|\benter\b|\bselect\b/.test(t)) return {action:'ok'};
+  return null;
+}
+function runVoiceAction(a){
+  switch(a.action){
+    case 'volUp': clickEl($('volUp')); return 'Volume up';
+    case 'volDown': clickEl($('volDown')); return 'Volume down';
+    case 'mute': clickEl($('muteBtn')); return 'Mute toggled';
+    case 'chUp': clickEl($('chUp')); return 'Channel up';
+    case 'chDown': clickEl($('chDown')); return 'Channel down';
+    case 'play': clickEl($('play')); return 'Play';
+    case 'pause': clickEl($('pause')); return 'Pause';
+    case 'stop': clickEl($('stop')); return 'Stop';
+    case 'rw': clickEl($('rw')); return 'Rewind';
+    case 'ff': clickEl($('ff')); return 'Fast forward';
+    case 'home': goHome(); return 'Home';
+    case 'back': press('BACK'); return 'Back';
+    case 'exit': goExit(); return 'Exit';
+    case 'up': press('UP'); return 'Up';
+    case 'down': press('DOWN'); return 'Down';
+    case 'left': press('LEFT'); return 'Left';
+    case 'right': press('RIGHT'); return 'Right';
+    case 'ok': press('ENTER'); return 'OK';
+    case 'click': clickEl($('padClick')); return 'Click';
+    case 'youtube': clickApp('youtube'); return 'Opening YouTube';
+    case 'netflix': clickApp('netflix'); return 'Opening Netflix';
+    case 'amazon': clickApp('amazon'); return 'Opening Prime Video';
+    case 'scrollUp': scrollBy(0,160); return 'Scrolling up';
+    case 'scrollDown': scrollBy(0,-160); return 'Scrolling down';
+    case 'power': doPowerOff(); return 'Turning TV off';
+    case 'type':
+      $('kbInput').value=a.arg; kbSend();
+      return 'Typing “'+a.arg+'”';
+    case 'volSet':
+      if(brand!=='lg') return null;
+      cmd('ssap://audio/setVolume',{volume:a.arg},'set volume');
+      return 'Volume '+a.arg;
+    default: return null;
+  }
+}
+function stopListening(){
+  listening=false;
+  if(voiceBtn){ voiceBtn.classList.remove('listening'); voiceBtn.textContent='🎙️ Tap to speak'; }
+  try{ if(recog) recog.stop(); }catch(e){}
+}
+if(!SpeechRec){
+  if(voiceBtn){ voiceBtn.disabled=true; voiceBtn.textContent='🎙️ Voice not supported here'; }
+  setVoiceStatus('Voice control isn\'t available in this browser. Use Safari on iPhone (or Chrome on desktop/Android) — Firefox doesn\'t support it.');
+}else{
+  voiceBtn.addEventListener('click', function(){
+    if(listening){ stopListening(); setVoiceStatus('Stopped listening.'); return; }
+    if(!isConnected){ setVoiceStatus('Connect to the TV first, then tap the mic.'); return; }
+    try{
+      recog=new SpeechRec();
+      recog.lang='en-US'; recog.interimResults=false; recog.maxAlternatives=1; recog.continuous=false;
+      recog.onstart=function(){
+        listening=true;
+        voiceBtn.classList.add('listening'); voiceBtn.textContent='🎙️ Listening… tap to stop';
+        setVoiceStatus('Listening… say a command, e.g. “volume up” or “open YouTube”.');
+      };
+      recog.onresult=function(ev){
+        var heard='';
+        try{ heard=ev.results[0][0].transcript||''; }catch(e){}
+        heard=heard.trim();
+        stopListening();
+        if(!heard){ setVoiceStatus('Didn\'t catch that — tap the mic and try again.'); return; }
+        var parsed=parseVoice(heard);
+        if(!parsed){ setVoiceStatus('Heard: <b>“'+heard+'”</b> — didn\'t understand that. Try: volume up, mute, play, home, open YouTube.'); return; }
+        var done=runVoiceAction(parsed);
+        if(done===null){ setVoiceStatus('Heard: <b>“'+heard+'”</b> — that command isn\'t supported on this brand.'); return; }
+        setVoiceStatus('Heard: <b>“'+heard+'”</b> → '+done+'.');
+        dlog('voice "'+heard+'" -> '+parsed.action);
+      };
+      recog.onerror=function(ev){
+        stopListening();
+        var err=(ev&&ev.error)||'error';
+        if(err==='not-allowed' || err==='service-not-allowed'){
+          setVoiceStatus('Microphone blocked. Allow microphone for this page in Safari (aA → Website Settings / Settings → Safari), then tap the mic again.');
+        }else if(err==='no-speech'){
+          setVoiceStatus('Didn\'t hear anything — tap the mic and speak clearly.');
+        }else if(err==='network'){
+          setVoiceStatus('Speech recognition needs internet — check your connection and try again.');
+        }else if(err==='aborted'){
+          setVoiceStatus('Stopped listening.');
+        }else{
+          setVoiceStatus('Voice error ('+err+') — tap the mic and try again.');
+        }
+        dlog('voice error: '+err);
+      };
+      recog.onend=function(){ if(listening) stopListening(); };
+      recog.start();
+    }catch(e){
+      stopListening();
+      setVoiceStatus('Couldn\'t start voice recognition ('+e.message+'). Try again.');
+    }
+  });
+}
 
 // prefill saved IP (a ?tv=1.2.3.4 share link overrides the saved one)
 try{
