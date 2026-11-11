@@ -79,6 +79,10 @@
   .hidden{display:none !important;}
   .hint{font-size:12px;color:var(--dim);line-height:1.6;}
   #voiceBtn{font-size:18px;padding:16px 10px;}
+  body.simple-mode #touchCard, body.simple-mode #dpadCard, body.simple-mode #scrollCard, body.simple-mode #kbCard{display:none !important;}
+  input[type=range]{-webkit-appearance:none;appearance:none;width:100%;height:8px;border-radius:999px;background:var(--btn);outline:none;}
+  input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:28px;height:28px;border-radius:50%;background:var(--accent);cursor:pointer;}
+  input[type=range]::-moz-range-thumb{width:28px;height:28px;border:none;border-radius:50%;background:var(--accent);cursor:pointer;}
   #voiceBtn.listening{background:#be123c;animation:pulse 1.2s ease-in-out infinite;}
   @keyframes pulse{0%,100%{transform:scale(1);}50%{transform:scale(1.03);}}
   #voiceStatus{font-size:13px;color:var(--dim);text-align:center;min-height:20px;line-height:1.4;margin-top:10px;}
@@ -146,9 +150,13 @@
         <button class="btn" id="powerBtn" style="color:#fda4af;">⏻ Power off</button>
         <button class="btn" id="muteBtn">🔇 Mute</button>
       </div>
+      <div style="height:10px"></div>
+      <div class="row">
+        <button class="btn small" id="simpleToggle">✨ Simple view</button>
+      </div>
     </div>
 
-    <div class="card">
+    <div class="card" id="touchCard">
       <h2>Touchpad</h2>
       <div id="pad"><span class="padhint" id="padHint">Drag to move the cursor<br>Tap to click &middot; two fingers to scroll</span></div>
       <div style="height:10px"></div>
@@ -164,7 +172,7 @@
       </div>
     </div>
 
-    <div class="card">
+    <div class="card" id="dpadCard">
       <h2>D-pad</h2>
       <div class="dpad">
         <div></div><button class="btn" data-key="UP">▲</button><div></div>
@@ -173,7 +181,7 @@
       </div>
     </div>
 
-    <div class="card">
+    <div class="card" id="scrollCard">
       <h2>Scroll</h2>
       <div class="scrollpad">
         <div></div><button class="btn" data-sdx="0" data-sdy="160">▲</button><div></div>
@@ -209,6 +217,10 @@
           <div class="volval">&nbsp;</div>
           <button class="btn" id="chDown">CH −</button>
         </div>
+      </div>
+      <div id="volSliderRow" style="margin-top:12px;">
+        <input type="range" id="volSlider" min="0" max="100" value="20" step="1" aria-label="Volume">
+        <p class="hint" style="text-align:center;margin:6px 0 0;">Drag for exact volume (LG only) · hold Vol +/− or CH +/− to keep changing</p>
       </div>
     </div>
 
@@ -246,7 +258,19 @@
         <button class="btn primary" id="ytSearchBtn">Search</button>
       </div>
       <div id="ytStatus" style="font-size:13px;color:var(--dim);text-align:center;min-height:20px;line-height:1.4;margin-top:10px;">Opens YouTube, goes to Search, types your query and runs it.</div>
+      <div id="ytRecent" style="display:flex;flex-wrap:wrap;gap:8px;justify-content:center;margin-top:8px;"></div>
       <p class="hint">It navigates with the D-pad (menu → Search), so if it lands on the wrong item, fix it with the D-pad and type in the Keyboard card instead. Samsung: the search screen opens, but type with the TV's on-screen keyboard — Samsung gives remotes no text-input API.</p>
+    </div>
+
+    <div class="card">
+      <h2>😴 Sleep timer</h2>
+      <div class="row">
+        <button class="btn small" data-sleep="15">15 min</button>
+        <button class="btn small" data-sleep="30">30 min</button>
+        <button class="btn small" data-sleep="60">60 min</button>
+        <button class="btn small" id="sleepCancel">Cancel</button>
+      </div>
+      <div id="sleepStatus" style="font-size:13px;color:var(--dim);text-align:center;min-height:20px;line-height:1.4;margin-top:10px;">TV turns off when the timer ends. The page must stay open.</div>
     </div>
 
     <div class="card">
@@ -266,7 +290,7 @@
 <script>
 (function(){
 "use strict";
-var APP_VER='v35';
+var APP_VER='v36';
 // Cache the page for offline loads: iOS pauses a-Shell in the background,
 // which also stops its file server. The service worker serves the cached
 // page so it still opens; the relay is only needed as a fallback.
@@ -628,6 +652,9 @@ function applyBrandUI(){
   $('pinBtn').classList.toggle('hidden', brand!=='lg');
   $('certSection').classList.toggle('hidden', brand==='roku');
   $('powerBtn').textContent = brand==='lg' ? '⏻ Power off' : '⏻ Power';
+  // Exact-volume slider is LG-only: Samsung's remote channel and Roku ECP
+  // only offer volume up/down keys, no absolute level.
+  $('volSliderRow').classList.toggle('hidden', brand!=='lg');
   if(brand!=='lg') $('volVal').textContent='';
 }
 function setBrand(b, skipValidate){
@@ -1219,7 +1246,7 @@ function heartbeat(){
   var to=setTimeout(function(){ delete pending[id]; setAsleep(true); }, 4000);
   pending[id]={resolve:function(p){
     clearTimeout(to); setAsleep(false);
-    if(p && typeof p.volume!=='undefined') $('volVal').textContent='Vol '+p.volume+(p.muted?' (muted)':'');
+    if(p && typeof p.volume!=='undefined') showVolume(p.volume, p.muted);
   }, reject:function(e){ clearTimeout(to); setAsleep(true); }};
   try{ ws.send(JSON.stringify({id:id, type:'request', uri:'ssap://audio/getVolume', payload:{}})); }
   catch(e){ clearTimeout(to); delete pending[id]; setAsleep(true); }
@@ -1430,12 +1457,15 @@ function cmd(uri, payload, label){
     .catch(function(e){ setStatus('Failed: '+e.message, true); });
 }
 
+function showVolume(vol, muted){
+  $('volVal').textContent='Vol '+vol+(muted?' (muted)':'');
+  var s=$('volSlider');
+  if(s && document.activeElement!==s) s.value=vol;
+}
 function refreshVolume(){
   if(brand!=='lg') return;
   request('ssap://audio/getVolume').then(function(p){
-    if(p && typeof p.volume!=='undefined'){
-      $('volVal').textContent='Vol '+p.volume+(p.muted?' (muted)':'');
-    }
+    if(p && typeof p.volume!=='undefined') showVolume(p.volume, p.muted);
   }).catch(function(){});
 }
 
@@ -1477,6 +1507,7 @@ function youtubeSearch(q){
   if(!q){ setYtStatus('Type something to search for first.'); return; }
   if(!isConnected){ setYtStatus('Connect to the TV first.'); return; }
   ytTimers.forEach(function(t){ clearTimeout(t); }); ytTimers=[];
+  saveYtRecent(q);
   dlog('yt search: "'+q+'" ('+brand+')');
   setYtStatus('Opening YouTube…');
   if(brand==='lg') cmd('ssap://system.launcher/launch',{id:'youtube.leanback.v4'},'YouTube');
@@ -1538,8 +1569,32 @@ for(var j=0;j<appBtns.length;j++){
   (function(b){ b.addEventListener('click', function(){ var a=b.getAttribute('data-app'); if(brand!=='lg') brandLaunchApp(a); else cmd('ssap://system.launcher/launch',{id:a}, b.textContent); }); })(appBtns[j]);
 }
 
-$('volUp').addEventListener('click', function(){ if(brand!=='lg') brandAction('volUp'); else cmd('ssap://audio/volumeUp',{},'volume up'); });
-$('volDown').addEventListener('click', function(){ if(brand!=='lg') brandAction('volDown'); else cmd('ssap://audio/volumeDown',{},'volume down'); });
+function doVolUp(){ if(brand!=='lg') brandAction('volUp'); else cmd('ssap://audio/volumeUp',{},'volume up'); }
+function doVolDown(){ if(brand!=='lg') brandAction('volDown'); else cmd('ssap://audio/volumeDown',{},'volume down'); }
+function doChUp(){ if(brand!=='lg') brandAction('chUp'); else cmd('ssap://tv/channelUp',{},'channel up'); }
+function doChDown(){ if(brand!=='lg') brandAction('chDown'); else cmd('ssap://tv/channelDown',{},'channel down'); }
+// Hold-to-repeat (v36): one tap = one step, holding the button keeps going.
+// The click handler stays for programmatic .click() (voice control): a real
+// tap already fired on pointerdown, and the click that follows it is
+// ignored via the timestamp guard, so nothing fires twice.
+function holdRepeat(el, fn){
+  var iv=null, startT=null;
+  function stop(){ if(iv){ clearInterval(iv); iv=null; } if(startT){ clearTimeout(startT); startT=null; } }
+  el.addEventListener('pointerdown', function(e){
+    e.preventDefault();
+    el._lastPtr=Date.now();
+    fn(); stop();
+    startT=setTimeout(function(){ iv=setInterval(fn, 170); }, 450);
+  });
+  ['pointerup','pointercancel','pointerleave'].forEach(function(ev){ el.addEventListener(ev, stop); });
+  el.addEventListener('contextmenu', function(e){ e.preventDefault(); });
+  el.addEventListener('click', function(){
+    if(el._lastPtr && Date.now()-el._lastPtr<1000) return;
+    fn();
+  });
+}
+holdRepeat($('volUp'), doVolUp);
+holdRepeat($('volDown'), doVolDown);
 $('muteBtn').addEventListener('click', function(){
   if(brand!=='lg'){ brandAction('mute'); return; }
   request('ssap://audio/getVolume').then(function(p){
@@ -1547,8 +1602,8 @@ $('muteBtn').addEventListener('click', function(){
   }).then(function(){ setStatus(''); refreshVolume(); })
   .catch(function(e){ setStatus('Failed: '+e.message, true); });
 });
-$('chUp').addEventListener('click', function(){ if(brand!=='lg') brandAction('chUp'); else cmd('ssap://tv/channelUp',{},'channel up'); });
-$('chDown').addEventListener('click', function(){ if(brand!=='lg') brandAction('chDown'); else cmd('ssap://tv/channelDown',{},'channel down'); });
+holdRepeat($('chUp'), doChUp);
+holdRepeat($('chDown'), doChDown);
 function doPowerOff(){
   if(brand==='samsung'){ samsungKey('KEY_POWER'); return; }
   if(brand==='roku'){ rokuKey('Power'); return; }
@@ -1604,6 +1659,10 @@ function parseVoice(raw){
   if((m=/^search youtube for (.+)$/.exec(t)) || (m=/^search for (.+) on youtube$/.exec(t)) ||
      (m=/^youtube search (.+)$/.exec(t)) || (m=/^search youtube (.+)$/.exec(t)) ||
      (m=/^play (.+) on youtube$/.exec(t))) return {action:'ytSearch', arg:m[1].trim()};
+  // Sleep timer must be checked before the "turn off" rule below, or
+  // "turn off in 30 minutes" would power off immediately.
+  if((m=/^sleep timer (\d+)(?:\s*minutes?)?$/.exec(t)) || (m=/^turn off in (\d+)\s*minutes?$/.exec(t))) return {action:'sleep', arg:Math.max(1,Math.min(180,parseInt(m[1],10)))};
+  if(/^(cancel|stop) sleep timer$/.test(t)) return {action:'sleepOff'};
   if((m=/^(type|search)\s+(.+)$/.exec(t))) return {action:'type', arg:m[2].trim()};
   if(/turn off|power off|switch off|shut down|turn the tv off/.test(t)) return {action:'power'};
   if((m=/set volume to (\d+)/.exec(t)) || (m=/^volume (\d+)$/.exec(t))) return {action:'volSet', arg:Math.max(0,Math.min(100,parseInt(m[1],10)))};
@@ -1635,11 +1694,13 @@ function parseVoice(raw){
 }
 function runVoiceAction(a){
   switch(a.action){
-    case 'volUp': clickEl($('volUp')); return 'Volume up';
-    case 'volDown': clickEl($('volDown')); return 'Volume down';
+    case 'volUp': doVolUp(); return 'Volume up';
+    case 'volDown': doVolDown(); return 'Volume down';
     case 'mute': clickEl($('muteBtn')); return 'Mute toggled';
-    case 'chUp': clickEl($('chUp')); return 'Channel up';
-    case 'chDown': clickEl($('chDown')); return 'Channel down';
+    case 'chUp': doChUp(); return 'Channel up';
+    case 'chDown': doChDown(); return 'Channel down';
+    case 'sleep': startSleepTimer(a.arg); return 'Sleep timer set for '+a.arg+' minutes';
+    case 'sleepOff': cancelSleepTimer(false); return 'Sleep timer off';
     case 'play': clickEl($('play')); return 'Play';
     case 'pause': clickEl($('pause')); return 'Pause';
     case 'stop': clickEl($('stop')); return 'Stop';
@@ -1782,6 +1843,97 @@ if(!SpeechRec){
     startVoiceRecognition();
   });
 }
+
+// ---------- Ease-of-use features (v36) ----------
+// Simple view: hides the fiddly cards (touchpad, D-pad, scroll, keyboard)
+// and keeps power, volume/channel, playback, voice, apps, YouTube search
+// and the sleep timer. Choice persists in localStorage.
+var LS_SIMPLE='tv_simple_mode';
+function setSimple(on){
+  try{ localStorage.setItem(LS_SIMPLE, on?'1':'0'); }catch(e){}
+  document.body.classList.toggle('simple-mode', !!on);
+  var b=$('simpleToggle'); if(b) b.textContent = on ? '🔧 Full view' : '✨ Simple view';
+}
+$('simpleToggle').addEventListener('click', function(){
+  setSimple(!document.body.classList.contains('simple-mode'));
+});
+try{ setSimple(localStorage.getItem(LS_SIMPLE)==='1'); }catch(e){}
+
+// Exact-volume slider (LG only; see applyBrandUI). Dragging updates the
+// display immediately and sends the level debounced, so one drag = one call.
+var sliderDebounce=null;
+$('volSlider').addEventListener('input', function(){
+  var n=parseInt($('volSlider').value,10)||0;
+  $('volVal').textContent='Vol '+n;
+  if(brand!=='lg') return;
+  if(sliderDebounce) clearTimeout(sliderDebounce);
+  sliderDebounce=setTimeout(function(){
+    request('ssap://audio/setVolume',{volume:n}).catch(function(){});
+    dlog('slider volume -> '+n);
+  }, 150);
+});
+
+// Recent YouTube searches: last 5, tap a chip to run it again.
+var LS_YT_RECENT='tv_yt_recent';
+function getYtRecent(){ try{ return JSON.parse(localStorage.getItem(LS_YT_RECENT)||'[]'); }catch(e){ return []; } }
+function renderYtRecent(){
+  var box=$('ytRecent'); if(!box) return;
+  box.innerHTML='';
+  getYtRecent().forEach(function(q){
+    var b=document.createElement('button');
+    b.className='btn small'; b.textContent='↻ '+q;
+    b.addEventListener('click', function(){ $('ytInput').value=q; youtubeSearch(q); });
+    box.appendChild(b);
+  });
+}
+function saveYtRecent(q){
+  var items=getYtRecent().filter(function(x){ return x.toLowerCase()!==q.toLowerCase(); });
+  items.unshift(q); items=items.slice(0,5);
+  try{ localStorage.setItem(LS_YT_RECENT, JSON.stringify(items)); }catch(e){}
+  renderYtRecent();
+}
+renderYtRecent();
+
+// Sleep timer: counts down in the page and powers the TV off at zero.
+// The page must stay open -- if Safari suspends it, the timer can't fire.
+// The end time persists, so a reload resumes the countdown.
+var LS_SLEEP_END='tv_sleep_end';
+var sleepTimeout=null, sleepInterval=null;
+function setSleepStatus(t){ var el=$('sleepStatus'); if(el) el.textContent=t; }
+function fmtSleep(ms){ var s=Math.max(0, Math.round(ms/1000)); return Math.floor(s/60)+':'+('0'+(s%60)).slice(-2); }
+function clearSleepTimers(){ if(sleepTimeout){ clearTimeout(sleepTimeout); sleepTimeout=null; } if(sleepInterval){ clearInterval(sleepInterval); sleepInterval=null; } }
+function cancelSleepTimer(silent){
+  clearSleepTimers();
+  try{ localStorage.removeItem(LS_SLEEP_END); }catch(e){}
+  if(!silent) setSleepStatus('Sleep timer off.');
+}
+function startSleepTimer(mins){
+  cancelSleepTimer(true);
+  var end=Date.now()+mins*60000;
+  try{ localStorage.setItem(LS_SLEEP_END, String(end)); }catch(e){}
+  function tick(){
+    var left=end-Date.now();
+    if(left<=0){ cancelSleepTimer(true); setSleepStatus('Sleep timer finished — TV off.'); return; }
+    setSleepStatus('Turning off in '+fmtSleep(left)+' — tap Cancel to stop. The page must stay open.');
+  }
+  sleepTimeout=setTimeout(function(){
+    cancelSleepTimer(true);
+    if(isConnected){ setSleepStatus('Sleep timer finished — TV off.'); dlog('sleep timer fired'); doPowerOff(); }
+    else setSleepStatus('Sleep timer finished, but the remote is not connected — TV left on.');
+  }, mins*60000);
+  sleepInterval=setInterval(tick, 1000);
+  tick();
+  dlog('sleep timer set: '+mins+' min');
+}
+document.querySelectorAll('[data-sleep]').forEach(function(b){
+  b.addEventListener('click', function(){ startSleepTimer(parseInt(b.getAttribute('data-sleep'),10)||30); });
+});
+$('sleepCancel').addEventListener('click', function(){ cancelSleepTimer(false); });
+try{
+  var savedEnd=parseInt(localStorage.getItem(LS_SLEEP_END)||'0',10);
+  if(savedEnd>Date.now()) startSleepTimer(Math.ceil((savedEnd-Date.now())/60000));
+  else if(savedEnd) localStorage.removeItem(LS_SLEEP_END);
+}catch(e){}
 
 // prefill saved IP (a ?tv=1.2.3.4 share link overrides the saved one)
 try{
