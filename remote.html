@@ -145,6 +145,14 @@
 
   <!-- REMOTE -->
   <div id="remote" class="hidden" style="display:flex;flex-direction:column;gap:14px;">
+    <div class="card" id="topVolCard" style="padding:12px 16px;">
+      <div class="row" style="align-items:center;">
+        <span style="font-size:18px;">🔊</span>
+        <input type="range" id="volSlider" min="0" max="100" value="20" step="1" aria-label="Volume" style="flex:1;min-width:0;">
+        <span id="volValTop" style="font-size:13px;font-weight:600;color:var(--dim);min-width:56px;text-align:right;">–</span>
+      </div>
+    </div>
+
     <div class="card">
       <div class="row">
         <button class="btn" id="powerBtn" style="color:#fda4af;">⏻ Power off</button>
@@ -218,10 +226,7 @@
           <button class="btn" id="chDown">CH −</button>
         </div>
       </div>
-      <div id="volSliderRow" style="margin-top:12px;">
-        <input type="range" id="volSlider" min="0" max="100" value="20" step="1" aria-label="Volume">
-        <p class="hint" style="text-align:center;margin:6px 0 0;">Drag for exact volume (LG only) · hold Vol +/− or CH +/− to keep changing</p>
-      </div>
+      <p class="hint" style="text-align:center;margin:10px 0 0;">Hold Vol +/− or CH +/− to keep changing · exact volume slider is at the top</p>
     </div>
 
     <div class="card">
@@ -290,7 +295,7 @@
 <script>
 (function(){
 "use strict";
-var APP_VER='v36';
+var APP_VER='v37';
 // Cache the page for offline loads: iOS pauses a-Shell in the background,
 // which also stops its file server. The service worker serves the cached
 // page so it still opens; the relay is only needed as a fallback.
@@ -654,7 +659,7 @@ function applyBrandUI(){
   $('powerBtn').textContent = brand==='lg' ? '⏻ Power off' : '⏻ Power';
   // Exact-volume slider is LG-only: Samsung's remote channel and Roku ECP
   // only offer volume up/down keys, no absolute level.
-  $('volSliderRow').classList.toggle('hidden', brand!=='lg');
+  $('topVolCard').classList.toggle('hidden', brand!=='lg');
   if(brand!=='lg') $('volVal').textContent='';
 }
 function setBrand(b, skipValidate){
@@ -1459,6 +1464,7 @@ function cmd(uri, payload, label){
 
 function showVolume(vol, muted){
   $('volVal').textContent='Vol '+vol+(muted?' (muted)':'');
+  var t=$('volValTop'); if(t) t.textContent=muted?'Muted':'Vol '+vol;
   var s=$('volSlider');
   if(s && document.activeElement!==s) s.value=vol;
 }
@@ -1865,6 +1871,7 @@ var sliderDebounce=null;
 $('volSlider').addEventListener('input', function(){
   var n=parseInt($('volSlider').value,10)||0;
   $('volVal').textContent='Vol '+n;
+  var t=$('volValTop'); if(t) t.textContent='Vol '+n;
   if(brand!=='lg') return;
   if(sliderDebounce) clearTimeout(sliderDebounce);
   sliderDebounce=setTimeout(function(){
