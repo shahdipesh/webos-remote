@@ -1,7 +1,7 @@
 // Network-first for the page files so app updates reach the phone on every
 // reload; falls back to the cache when offline (the cached page can still
 // control the TV over the LAN with no internet).
-var CACHE = 'tvremote-v12';
+var CACHE = 'tvremote-v13';
 
 self.addEventListener('install', function (e) { self.skipWaiting(); });
 

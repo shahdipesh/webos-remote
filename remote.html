@@ -226,7 +226,7 @@
     <div class="card">
       <h2>Voice control</h2>
       <button class="btn primary" id="voiceBtn">🎙️ Start voice control</button>
-      <div id="voiceStatus">Try: “volume up”, “mute”, “play”, “home”, “open YouTube”, “turn off”.</div>
+      <div id="voiceStatus">Try: “volume up”, “mute”, “play”, “home”, “open YouTube”, “search YouTube for…”, “turn off”.</div>
       <p class="hint">Tap once and it keeps listening for command after command — tap again, or say “stop listening”, to switch it off. The page must stay open; it can't listen in the background. Needs microphone permission and internet (the phone does the speech-to-text).</p>
     </div>
 
@@ -237,6 +237,16 @@
         <button class="btn small" data-app="youtube">YouTube</button>
         <button class="btn small" data-app="amazon">Prime</button>
       </div>
+    </div>
+
+    <div class="card">
+      <h2>🔍 YouTube search</h2>
+      <div class="pinrow">
+        <input id="ytInput" type="text" placeholder="Search YouTube…" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="search">
+        <button class="btn primary" id="ytSearchBtn">Search</button>
+      </div>
+      <div id="ytStatus" style="font-size:13px;color:var(--dim);text-align:center;min-height:20px;line-height:1.4;margin-top:10px;">Opens YouTube, goes to Search, types your query and runs it.</div>
+      <p class="hint">It navigates with the D-pad (menu → Search), so if it lands on the wrong item, fix it with the D-pad and type in the Keyboard card instead. Samsung: the search screen opens, but type with the TV's on-screen keyboard — Samsung gives remotes no text-input API.</p>
     </div>
 
     <div class="card">
@@ -256,7 +266,7 @@
 <script>
 (function(){
 "use strict";
-var APP_VER='v34';
+var APP_VER='v35';
 // Cache the page for offline loads: iOS pauses a-Shell in the background,
 // which also stops its file server. The service worker serves the cached
 // page so it still opens; the relay is only needed as a fallback.
@@ -1449,6 +1459,49 @@ function kbSend(){
 function kbDelete(){ if(brand==='roku'){ rokuKey('Backspace'); return; } cmd('ssap://com.webos.service.ime/deleteCharacters', {count:1}, 'delete'); }
 function kbEnter(){ if(brand==='roku'){ rokuKey('Enter'); return; } cmd('ssap://com.webos.service.ime/sendEnterKey', {}, 'enter'); }
 
+// YouTube search (v35). There is no documented search deep-link for the TV
+// YouTube app -- the documented launch target is a *video* (LG: id
+// youtube.leanback.v4 with contentTarget "v=<videoId>"), and Roku's YouTube
+// deep link is video-id only too. So search is done the way a person does
+// it, just automated: launch YouTube, D-pad to Search in the left menu
+// (LEFT opens the menu, UP moves to Search, ENTER opens it), type the query
+// with the same text path as the Keyboard card, then Enter to run it.
+// The steps are timed and logged, so if it lands wrong the debug log shows
+// exactly which step ran. Samsung has no text-input API, so there the flow
+// stops at the open search screen and the TV's on-screen keyboard takes over.
+var ytTimers=[];
+function ytLater(fn, ms){ ytTimers.push(setTimeout(fn, ms)); }
+function setYtStatus(t){ var el=$('ytStatus'); if(el) el.textContent=t; }
+function youtubeSearch(q){
+  q=(q||'').trim();
+  if(!q){ setYtStatus('Type something to search for first.'); return; }
+  if(!isConnected){ setYtStatus('Connect to the TV first.'); return; }
+  ytTimers.forEach(function(t){ clearTimeout(t); }); ytTimers=[];
+  dlog('yt search: "'+q+'" ('+brand+')');
+  setYtStatus('Opening YouTube…');
+  if(brand==='lg') cmd('ssap://system.launcher/launch',{id:'youtube.leanback.v4'},'YouTube');
+  else brandLaunchApp('youtube');
+  ytLater(function(){ setYtStatus('Opening the menu…'); press('LEFT'); dlog('yt: LEFT'); }, 6000);
+  ytLater(function(){ setYtStatus('Going to Search…'); press('UP'); dlog('yt: UP'); }, 6800);
+  ytLater(function(){ setYtStatus('Opening search…'); press('ENTER'); dlog('yt: ENTER'); }, 7600);
+  if(brand==='samsung'){
+    ytLater(function(){ setYtStatus('Search is open — type with the TV\'s on-screen keyboard. Samsung gives remotes no way to type.'); }, 9500);
+    return;
+  }
+  ytLater(function(){
+    setYtStatus('Typing “'+q+'”…');
+    $('kbInput').value=q; kbSend();
+    dlog('yt: typed query');
+  }, 9500);
+  ytLater(function(){
+    kbEnter();
+    setYtStatus('Searched YouTube for “'+q+'”.');
+    dlog('yt: submitted');
+  }, 10800);
+}
+$('ytSearchBtn').addEventListener('click', function(){ youtubeSearch($('ytInput').value); });
+$('ytInput').addEventListener('keydown', function(e){ if(e.key==='Enter'){ e.preventDefault(); youtubeSearch($('ytInput').value); } });
+
 function disconnect(silent){
   stopHeartbeat();
   if(ws){ try{ws.close();}catch(e){} ws=null; }
@@ -1546,6 +1599,11 @@ function parseVoice(raw){
   if(!t) return null;
   t=t.replace(/^(please|hey tv|ok tv|tv)\s+/,'').trim();
   var m;
+  // YouTube search must come before the generic "search ..." rule below,
+  // or "search youtube for cats" would just type "youtube for cats".
+  if((m=/^search youtube for (.+)$/.exec(t)) || (m=/^search for (.+) on youtube$/.exec(t)) ||
+     (m=/^youtube search (.+)$/.exec(t)) || (m=/^search youtube (.+)$/.exec(t)) ||
+     (m=/^play (.+) on youtube$/.exec(t))) return {action:'ytSearch', arg:m[1].trim()};
   if((m=/^(type|search)\s+(.+)$/.exec(t))) return {action:'type', arg:m[2].trim()};
   if(/turn off|power off|switch off|shut down|turn the tv off/.test(t)) return {action:'power'};
   if((m=/set volume to (\d+)/.exec(t)) || (m=/^volume (\d+)$/.exec(t))) return {action:'volSet', arg:Math.max(0,Math.min(100,parseInt(m[1],10)))};
@@ -1605,6 +1663,9 @@ function runVoiceAction(a){
     case 'type':
       $('kbInput').value=a.arg; kbSend();
       return 'Typing “'+a.arg+'”';
+    case 'ytSearch':
+      $('ytInput').value=a.arg; youtubeSearch(a.arg);
+      return 'Searching YouTube for “'+a.arg+'”';
     case 'volSet':
       if(brand!=='lg') return null;
       cmd('ssap://audio/setVolume',{volume:a.arg},'set volume');
