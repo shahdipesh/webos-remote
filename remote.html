@@ -225,9 +225,9 @@
 
     <div class="card">
       <h2>Voice control</h2>
-      <button class="btn primary" id="voiceBtn">🎙️ Tap to speak</button>
+      <button class="btn primary" id="voiceBtn">🎙️ Start voice control</button>
       <div id="voiceStatus">Try: “volume up”, “mute”, “play”, “home”, “open YouTube”, “turn off”.</div>
-      <p class="hint">Tap the mic, speak one command, and the remote runs it. The page must stay open and you tap each time — it can't listen in the background. Needs microphone permission and internet (the phone does the speech-to-text).</p>
+      <p class="hint">Tap once and it keeps listening for command after command — tap again, or say “stop listening”, to switch it off. The page must stay open; it can't listen in the background. Needs microphone permission and internet (the phone does the speech-to-text).</p>
     </div>
 
     <div class="card">
@@ -256,7 +256,7 @@
 <script>
 (function(){
 "use strict";
-var APP_VER='v33';
+var APP_VER='v34';
 // Cache the page for offline loads: iOS pauses a-Shell in the background,
 // which also stops its file server. The service worker serves the cached
 // page so it still opens; the relay is only needed as a fallback.
@@ -1512,17 +1512,26 @@ $('stop').addEventListener('click', function(){ if(brand!=='lg') brandAction('st
 $('rw').addEventListener('click', function(){ if(brand!=='lg') brandAction('rw'); else cmd('ssap://media.controls/rewind',{},'rewind'); });
 $('ff').addEventListener('click', function(){ if(brand!=='lg') brandAction('ff'); else cmd('ssap://media.controls/fastForward',{},'fast forward'); });
 
-// ---------- Voice control (v33) ----------
-// Tap-to-talk only: the browser's SpeechRecognition (webkitSpeechRecognition
-// on iOS Safari 14.5+) turns one spoken phrase into text, then the parser
-// below maps it onto the same button handlers the remote already uses -- so
-// voice works for LG, Samsung and Roku with no new TV protocol and no
-// server. It cannot listen in the background or wake on a word: iOS requires
-// a user tap to start it, and continuous mode is unreliable on Safari, so
-// this is single-shot (one command per tap).
+// ---------- Voice control (v33 single-shot, v34 continuous) ----------
+// The browser's SpeechRecognition (webkitSpeechRecognition on iOS Safari
+// 14.5+) turns speech into text, then the parser below maps it onto the same
+// button handlers the remote already uses -- so voice works for LG, Samsung
+// and Roku with no new TV protocol and no server. One tap starts it and it
+// stays on: continuous=true plus an auto-restart on onend/onerror, so a new
+// command works without another tap. Two Safari quirks shape the code:
+//  - continuous mode on iOS often never fires a *final* result, only
+//    interim ones, so a stable interim transcript (unchanged for ~900ms) is
+//    treated as a command too -- the timer resets on every interim update,
+//    so a half-heard "volume" never fires before "volume up" arrives.
+//  - Safari ends a session on its own after a while (and on silence); onend
+//    restarts it while the user still wants it on. Restarting from onend is
+//    allowed -- only the *first* start needs the user's tap.
+// It still cannot listen in the background or wake on a word: the page must
+// stay open, and the first start needs a tap.
 var SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
 var voiceBtn=$('voiceBtn'), voiceStatusEl=$('voiceStatus');
-var recog=null, listening=false;
+var recog=null, listening=false, voiceActive=false;
+var interimTimer=null, restartTimer=null, lastHeard='', lastHeardAt=0, restartFails=0;
 function setVoiceStatus(html){ if(voiceStatusEl) voiceStatusEl.innerHTML=html; }
 function clickEl(el){ if(el) el.click(); }
 function clickApp(name){
@@ -1603,61 +1612,113 @@ function runVoiceAction(a){
     default: return null;
   }
 }
+function handleHeard(heard){
+  heard=(heard||'').trim();
+  if(!heard) return;
+  // De-dupe: the same phrase can arrive as interim, then again as final.
+  // Allow a genuine repeat after 1.2s (e.g. "volume up" twice in a row).
+  var now=Date.now();
+  if(heard.toLowerCase()===lastHeard && now-lastHeardAt<1200) return;
+  lastHeard=heard.toLowerCase(); lastHeardAt=now;
+  if(/^(stop listening|stop voice|stop voice control)$/.test(lastHeard)){
+    stopListening();
+    setVoiceStatus('Voice control off. Tap the mic to start it again.');
+    return;
+  }
+  var parsed=parseVoice(heard);
+  if(!parsed){ setVoiceStatus('Heard: <b>“'+heard+'”</b> — didn\'t understand that. Still listening… try: volume up, mute, play, home, open YouTube.'); return; }
+  var done=runVoiceAction(parsed);
+  if(done===null){ setVoiceStatus('Heard: <b>“'+heard+'”</b> — that command isn\'t supported on this brand. Still listening…'); return; }
+  setVoiceStatus('Heard: <b>“'+heard+'”</b> → '+done+'. Still listening…');
+  dlog('voice "'+heard+'" -> '+parsed.action);
+}
+function clearVoiceTimers(){
+  if(interimTimer){ clearTimeout(interimTimer); interimTimer=null; }
+  if(restartTimer){ clearTimeout(restartTimer); restartTimer=null; }
+}
+function scheduleRestart(delayMs){
+  if(!voiceActive) return;
+  if(restartTimer) clearTimeout(restartTimer);
+  restartTimer=setTimeout(function(){ restartTimer=null; if(voiceActive) startVoiceRecognition(); }, delayMs);
+}
 function stopListening(){
-  listening=false;
-  if(voiceBtn){ voiceBtn.classList.remove('listening'); voiceBtn.textContent='🎙️ Tap to speak'; }
-  try{ if(recog) recog.stop(); }catch(e){}
+  voiceActive=false; listening=false;
+  clearVoiceTimers();
+  if(voiceBtn){ voiceBtn.classList.remove('listening'); voiceBtn.textContent='🎙️ Start voice control'; }
+  var r=recog; recog=null;
+  try{ if(r) r.stop(); }catch(e){}
+}
+function startVoiceRecognition(){
+  if(!voiceActive) return;
+  try{
+    recog=new SpeechRec();
+    recog.lang='en-US'; recog.interimResults=true; recog.maxAlternatives=1; recog.continuous=true;
+    recog.onstart=function(){
+      listening=true; restartFails=0;
+      if(voiceBtn){ voiceBtn.classList.add('listening'); voiceBtn.textContent='🎙️ Listening… tap to stop'; }
+      setVoiceStatus('Listening… say a command, e.g. “volume up” or “open YouTube”. Say “stop listening” to switch off.');
+    };
+    recog.onresult=function(ev){
+      restartFails=0;
+      try{
+        for(var i=ev.resultIndex; i<ev.results.length; i++){
+          var res=ev.results[i];
+          var txt=(res[0]&&res[0].transcript||'').trim();
+          if(!txt) continue;
+          if(res.isFinal){
+            if(interimTimer){ clearTimeout(interimTimer); interimTimer=null; }
+            handleHeard(txt);
+          }else{
+            // Safari continuous often never sends a final: run the command
+            // once the interim text has been stable for ~900ms.
+            if(interimTimer) clearTimeout(interimTimer);
+            interimTimer=setTimeout(function(t){ return function(){ interimTimer=null; handleHeard(t); }; }(txt), 900);
+            setVoiceStatus('Heard so far: <b>“'+txt+'”</b>…');
+          }
+        }
+      }catch(e){ dlog('voice result error: '+e.message); }
+    };
+    recog.onerror=function(ev){
+      var err=(ev&&ev.error)||'error';
+      dlog('voice error: '+err);
+      if(err==='not-allowed' || err==='service-not-allowed' || err==='audio-capture'){
+        stopListening();
+        setVoiceStatus('Microphone blocked. Allow microphone for this page in Safari (aA → Website Settings / Settings → Safari), then tap the mic again.');
+        return;
+      }
+      // Transient (no-speech / network / aborted): stay on, restart shortly.
+      // onend usually follows an error, so let it do the restart if it does;
+      // this is the backstop for when it doesn't.
+      if(voiceActive) scheduleRestart(err==='network' ? 1500 : 500);
+    };
+    recog.onend=function(){
+      listening=false;
+      if(interimTimer){ clearTimeout(interimTimer); interimTimer=null; }
+      if(!voiceActive) return;
+      // Safari ends sessions on its own (silence / time limit) -- restart.
+      scheduleRestart(300);
+    };
+    recog.start();
+  }catch(e){
+    restartFails++;
+    dlog('voice start failed: '+e.message);
+    if(restartFails>=5){
+      stopListening();
+      setVoiceStatus('Voice recognition wouldn\'t start ('+e.message+'). Tap the mic to try again.');
+    }else if(voiceActive){
+      scheduleRestart(800);
+    }
+  }
 }
 if(!SpeechRec){
   if(voiceBtn){ voiceBtn.disabled=true; voiceBtn.textContent='🎙️ Voice not supported here'; }
   setVoiceStatus('Voice control isn\'t available in this browser. Use Safari on iPhone (or Chrome on desktop/Android) — Firefox doesn\'t support it.');
 }else{
   voiceBtn.addEventListener('click', function(){
-    if(listening){ stopListening(); setVoiceStatus('Stopped listening.'); return; }
+    if(voiceActive){ stopListening(); setVoiceStatus('Voice control off. Tap the mic to start it again.'); return; }
     if(!isConnected){ setVoiceStatus('Connect to the TV first, then tap the mic.'); return; }
-    try{
-      recog=new SpeechRec();
-      recog.lang='en-US'; recog.interimResults=false; recog.maxAlternatives=1; recog.continuous=false;
-      recog.onstart=function(){
-        listening=true;
-        voiceBtn.classList.add('listening'); voiceBtn.textContent='🎙️ Listening… tap to stop';
-        setVoiceStatus('Listening… say a command, e.g. “volume up” or “open YouTube”.');
-      };
-      recog.onresult=function(ev){
-        var heard='';
-        try{ heard=ev.results[0][0].transcript||''; }catch(e){}
-        heard=heard.trim();
-        stopListening();
-        if(!heard){ setVoiceStatus('Didn\'t catch that — tap the mic and try again.'); return; }
-        var parsed=parseVoice(heard);
-        if(!parsed){ setVoiceStatus('Heard: <b>“'+heard+'”</b> — didn\'t understand that. Try: volume up, mute, play, home, open YouTube.'); return; }
-        var done=runVoiceAction(parsed);
-        if(done===null){ setVoiceStatus('Heard: <b>“'+heard+'”</b> — that command isn\'t supported on this brand.'); return; }
-        setVoiceStatus('Heard: <b>“'+heard+'”</b> → '+done+'.');
-        dlog('voice "'+heard+'" -> '+parsed.action);
-      };
-      recog.onerror=function(ev){
-        stopListening();
-        var err=(ev&&ev.error)||'error';
-        if(err==='not-allowed' || err==='service-not-allowed'){
-          setVoiceStatus('Microphone blocked. Allow microphone for this page in Safari (aA → Website Settings / Settings → Safari), then tap the mic again.');
-        }else if(err==='no-speech'){
-          setVoiceStatus('Didn\'t hear anything — tap the mic and speak clearly.');
-        }else if(err==='network'){
-          setVoiceStatus('Speech recognition needs internet — check your connection and try again.');
-        }else if(err==='aborted'){
-          setVoiceStatus('Stopped listening.');
-        }else{
-          setVoiceStatus('Voice error ('+err+') — tap the mic and try again.');
-        }
-        dlog('voice error: '+err);
-      };
-      recog.onend=function(){ if(listening) stopListening(); };
-      recog.start();
-    }catch(e){
-      stopListening();
-      setVoiceStatus('Couldn\'t start voice recognition ('+e.message+'). Try again.');
-    }
+    voiceActive=true;
+    startVoiceRecognition();
   });
 }
 
